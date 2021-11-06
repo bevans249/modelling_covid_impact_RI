@@ -1,0 +1,2 @@
+"vaccine","sample_size","mean(predicts_2020)","mean(actuals_2020)","point_estimate","low_bound","upper_bound","p_value"
+"DTP3",29,0.885062097315333,0.855540540540541,-0.097656757358132,-0.162903101072262,-0.0324104136440021,1.15316951486951e-06
