@@ -132,7 +132,7 @@
 "Paraguay","PRY","ARIMA(1,0,0) with non-zero mean","89.7%","85.8%","93.7%"
 "Peru","PER","ARIMA(0,0,0) with non-zero mean","95.4%","89.8%","101.1%"
 "Philippines","PHL","ARIMA(0,1,0)","79.0%","64.9%","93.1%"
-"Poland","POL","ARIMA(0,1,0)","98.0%","97.5%","98.5%"
+"Poland","POL","ARIMA(0,0,0) with non-zero mean","99.0%","99.0%","99.0%"
 "Portugal","PRT","ARIMA(0,0,0) with non-zero mean","98.4%","96.0%","100.9%"
 "Qatar","QAT","ARIMA(0,0,1) with non-zero mean","97.7%","94.3%","101.1%"
 "Republic of Korea","KOR","ARIMA(0,0,1) with non-zero mean","97.6%","95.3%","99.9%"
