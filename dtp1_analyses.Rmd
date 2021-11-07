@@ -1,7 +1,7 @@
 ---
-title: "DTP3 analyses for COVID-19 impact on RI modelling"
+title: "Vax forecast - DTP1"
 author: "Beth Evans"
-date: "07/10/2021"
+date: "10/09/2021"
 output: 
   html_document:
     code_folding: "show"
@@ -38,8 +38,8 @@ Import data:
 - Income group classification from World Bank <br>
 - Gavi classification pre-compiled dataset from Gavi website country documents and Eligibility policy <br>
 ```{r}
-    file_path_dtp3 <- here::here("data", "dtp3.csv")
-    data_raw <- file_path_dtp3 %>%
+    file_path_dtp1 <- here::here("data", "dtp1.csv")
+    data_raw <- file_path_dtp1 %>%
       rio::import(header = TRUE) %>%
       tibble()
     data_raw
@@ -183,10 +183,12 @@ Combine forecast data with actuals to create full timeseries
     output <- rbind(x, x2) %>%
       arrange(country, year) %>%
       mutate(coverage = as.numeric(coverage), ARIMA_model = as.character(ARIMA_model)) %>%
-      mutate(plot_key = ifelse(ARIMA_model != "WUENIC reported", "Forecast", "Historic"),
-             predicts_lower = as.numeric(low_bound),
-             predicts_upper = as.numeric(upper_bound))
-
+      mutate(plot_key = ifelse(ARIMA_model != "WUENIC reported", "Forecast", "Historic"))
+    
+    output %<>%
+      mutate(low_bound = as.numeric(low_bound),
+             upper_bound = as.numeric(upper_bound))
+    
     #set-up data for t-test conducted later
     ttest_2020 <- output %>%
       filter(year == "2020-12-31") %>%
@@ -194,32 +196,26 @@ Combine forecast data with actuals to create full timeseries
       dplyr::rename(predicts_2020 = coverage) %>%
       inner_join(cov_2020, by = "iso_code")
     
-    #create consolidated output dataset
-    cov_forecast <- output %>%
-      as_tibble() %>%
-      filter(year == "2020-12-31") %>%
-      dplyr::select(-c(ARIMA_model, country)) %>%
-      dplyr::rename(predicts_2020 = coverage) %>%
-      inner_join(cov_2020, by = "iso_code") %>%
+    #create dataset for linear models    
+    cov_forecast <- ttest_2020 %>%
+      as_tibble() 
+    
+    cov_forecast %<>%
       filter(!is.na(actuals_2020)) %>%
+      dplyr::rename(predicts_lower = low_bound,
+             predicts_upper = upper_bound) %>%
       mutate(cov_delta_mean = actuals_2020 - predicts_2020,
              cov_delta_high = actuals_2020 - predicts_upper,
              cov_delta_low = actuals_2020 - predicts_lower) %>%
       dplyr::select(country, iso_code, region, income_group, gavi_status, predicts_2020, 
-                    predicts_lower, predicts_upper, actuals_2020, cov_delta_mean, 
-                    cov_delta_high, cov_delta_low) %>%
-      mutate(confident_95 = ifelse(actuals_2020 > predicts_lower & actuals_2020 < predicts_upper,
+                    predicts_lower, predicts_upper, actuals_2020, cov_delta_mean, cov_delta_high, cov_delta_low)
+    
+    cov_forecast %<>%
+      mutate(confidence_95_level = ifelse(actuals_2020 > predicts_lower & actuals_2020 < predicts_upper,
                                    FALSE, TRUE),
              ci_width = predicts_upper - predicts_lower)
-    
-    #Add in other groupings for analyses
-    cov_forecast %<>%
-      mutate(un_region = countrycode(iso_code, origin = "iso3c", destination = "un.region.name"),
-             income_group = dplyr::recode_factor(income_group,"Low income" = "LIC",
-                                                 "Lower middle income" = "LMIC",
-                                                 "Upper middle income" = "UMIC",
-                                                 "High income" = "HIC"),
-             gavi_binary = ifelse(gavi_status == "Never Gavi" | gavi_status == "Fully self-financing", "Not eligible", "Gavi-eligible"))
+  
+    write.csv(cov_forecast,"dtp1_range.csv", row.names = FALSE)
 ```
 
 ## Plot and visualise outputs
@@ -233,7 +229,7 @@ Plot single country output
     country_vis = ggplot(data = country_dat, aes(x = year(year), y = coverage, color = ARIMA_model))+
       geom_point()+
       geom_smooth(colour = "darkgrey")+
-      labs(title = "Jordan: WUENIC reported DTP3 coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
+      labs(title = "Jordan: WUENIC reported DTP1 coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
            x = "Year",
            y = "Coverage (%)")+
       scale_colour_manual(name = "Datapoint:", 
@@ -271,7 +267,7 @@ Plot single country output
       geom_point()+
       geom_point(data = pop_dat_2020, aes(x = year(year), y = coverage, color = plot_key), shape = 4)+
       geom_smooth(colour = "darkgrey")+
-      labs(title = "DTP3: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
+      labs(title = "DTP1: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
            y = "Coverage (%)",
            x = "Year")+
       theme_bw()+
@@ -295,7 +291,7 @@ Plot single country output
     pop_vis
     
     #save file
-    ggsave(filename = "forecast_pop_dtp3.png", plot = pop_vis, 
+    ggsave(filename = "forecast_pop.png", plot = pop_vis, 
            width = 30, height = 10, units = "cm")
 ```
 
@@ -316,7 +312,7 @@ Output shown for 15 countries at a time - changeable by changing the paginate ou
     vis = ggplot(data = plot_dat, aes(x = year(year), y = coverage, color = plot_key))+
       geom_point()+
       geom_smooth(colour = "lightgrey")+
-      labs(title = "DTP3: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
+      labs(title = "DTP1: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
            y = "Coverage (%)",
            x = "Year")+
       theme_bw()+
@@ -341,7 +337,7 @@ Output shown for 15 countries at a time - changeable by changing the paginate ou
 
 ### Save output as file
 ```{r, message = FALSE, warnings = FALSE}
-    ggsave(filename = "forecast_dtp3.png", plot = vis, 
+    ggsave(filename = "forecast.png", plot = vis, 
            width = 25, height = 20, units = "cm")
 ```
 
@@ -357,14 +353,14 @@ Then, WUENIC country-specific documentation was reviewed to confirm whether to r
 
 For option (3):
 ```{r}
-    dtp3_change <- output %>% 
+    dtp1_change <- output %>% 
       filter(year == "2019-12-31" | year == "2020-12-31") %>% 
       dplyr::select(c(country, iso_code, year, coverage)) %>% 
       spread(year, coverage) %>% 
       dplyr::rename(Y2019 = "2019-12-31", Y2020 = "2020-12-31") %>% 
       mutate(delta = Y2020-Y2019)
 
-      #write.csv(dtp3_change,"Forecast_improvement_dtp3.csv", row.names = FALSE)
+      write.csv(dtp1_change,"Forecast_improvement_dtp1.csv", row.names = FALSE)
 ```
 
 
@@ -395,7 +391,7 @@ Countries considered as potential unreliable estimated coverage estimates are: <
     removed_vis = ggplot(data = removed_dat, aes(x = year(year), y = coverage, color = plot_key))+
       geom_point()+
       geom_smooth(colour = "darkgrey")+
-      labs(title = "DTP3: Countries removed from further analysis due to unreliable datapoints", 
+      labs(title = "DTP1: Countries removed from further analysis due to unreliable datapoints", 
            y = "Coverage (%)",
            x = "Year")+
       theme_bw()+
@@ -417,35 +413,31 @@ Countries considered as potential unreliable estimated coverage estimates are: <
     removed_vis
     
     #save file
-    ggsave(filename = "removed_countries_dtp3.png", plot = removed_vis, 
+    ggsave(filename = "removed_countries.png", plot = removed_vis, 
            width = 30, height = 30, units = "cm")
 ```
 
 <br>
 Remove datapoints:
 ```{r}
-  cov_forecast_clean <- cov_forecast %>%
-    dplyr::filter(country != "Haiti" & country != "Libya" & country != "Samoa" & 
-                    country != "Solomon Islands" & country != "Brazil"& 
-                    country != "El Salvador" & country != "Jordan" & 
-                    country != "Venezuela (Bolivarian Republic of)"& country != "Suriname")
-
-  cov_forecast %<>%
-    mutate(datapoint_removed = ifelse(iso_code %in% cov_forecast_clean$iso_code, FALSE, TRUE))
-  
+  ttest_2020 %<>%
+    dplyr::filter(country != "Haiti" & country != "Libya" & country != "Samoa" & country != "Solomon Islands" & country != "Brazil"
+                  & country != "El Salvador" & country != "Jordan" & country != "Venezuela (Bolivarian Republic of)" 
+                  & country != "Suriname")
 ```
 
-### T-test: For all countries combined
+
+### For all countries combined
 ```{r}
-    ttest_cov_drop <- t.test(cov_forecast_clean$actuals_2020,
-                             cov_forecast_clean$predicts_2020,
+    ttest_cov_drop <- t.test(ttest_2020$actuals_2020,
+                             ttest_2020$predicts_2020,
                              paired = TRUE,
                              alternative = "two.sided")
     
-    total <- cov_forecast_clean %>%
+    total <- ttest_2020 %>%
       filter(!is.na(actuals_2020)) %>%
       dplyr::summarize(mean(actuals_2020), mean(predicts_2020)) %>%
-      mutate(vaccine = "DTP3") %>%
+      mutate(vaccine = "DTP1") %>%
       dplyr::select(vaccine, "mean(actuals_2020)", "mean(predicts_2020)")
     
     total_test <- as.data.frame(do.call(cbind, ttest_cov_drop))
@@ -458,16 +450,16 @@ Remove datapoints:
     tt_total <- total_test %>%
       dplyr::select(estimate, p.value, parameter, conf.low, conf.high) %>%
       dplyr::rename(point_estimate = estimate, p_value = p.value, sample_size = parameter, low_bound = conf.low, upper_bound = conf.high) %>%
-      mutate(sample_size = (sample_size+1), vaccine = "DTP3") %>% #since parameter is degrees of freedom not sample size
+      mutate(sample_size = (sample_size+1), vaccine = "DTP1") %>% #since parameter is degrees of freedom not sample size
       left_join(total, by = "vaccine") %>%
       dplyr::select(vaccine, sample_size, "mean(predicts_2020)", "mean(actuals_2020)", point_estimate, low_bound, upper_bound, p_value)
 
     tt_total
 ```
-### T-test: For subset of countries where 95% confidence that coverage changed
+### For subset of countries where 95% confidence that coverage changed
 ```{r}
-    confident_countries <- cov_forecast_clean %>%
-      filter(confident_95 == TRUE) 
+    confident_countries <- cov_forecast %>%
+      filter(confidence_95_level == TRUE) 
 
     ttest_cov_drop_cleaned <- t.test(confident_countries$actuals_2020,
                              confident_countries$predicts_2020,
@@ -477,7 +469,7 @@ Remove datapoints:
     total_cleaned <- confident_countries %>%
       filter(!is.na(actuals_2020)) %>%
       dplyr::summarize(mean(actuals_2020), mean(predicts_2020)) %>%
-      mutate(vaccine = "DTP3") %>%
+      mutate(vaccine = "DTP1") %>%
       dplyr::select(vaccine, "mean(actuals_2020)", "mean(predicts_2020)")
     
     total_test_clean <- as.data.frame(do.call(cbind, ttest_cov_drop_cleaned))
@@ -490,7 +482,7 @@ Remove datapoints:
     tt_total_clean <- total_test_clean %>%
       dplyr::select(estimate, p.value, parameter, conf.low, conf.high) %>%
       dplyr::rename(point_estimate = estimate, p_value = p.value, sample_size = parameter, low_bound = conf.low, upper_bound = conf.high) %>%
-      mutate(sample_size = (sample_size+1), vaccine = "DTP3") %>% #since parameter is degrees of freedom not sample size
+      mutate(sample_size = (sample_size+1), vaccine = "DTP1") %>% #since parameter is degrees of freedom not sample size
       left_join(total, by = "vaccine") %>%
       dplyr::select(vaccine, sample_size, "mean(predicts_2020)", "mean(actuals_2020)", point_estimate, low_bound, upper_bound, p_value)
 
@@ -500,62 +492,33 @@ Remove datapoints:
 
 ### By region
 ```{r}
-    ttest_region <- cov_forecast_clean %>%
+    ttest_region <- ttest_2020 %>%
       filter(!is.na(actuals_2020)) %>%
-      group_by(un_region) %>% 
+      group_by(region) %>% 
       do(tidy(t.test(.$actuals_2020, 
                      .$predicts_2020, 
                      alt = "two.sided", 
                      paired = TRUE)))
 
-    reg <- cov_forecast_clean %>%
+    reg <- ttest_2020 %>%
       filter(!is.na(actuals_2020)) %>%
-      group_by(un_region) %>%
+      group_by(region) %>%
       dplyr::summarise(mean(actuals_2020), mean(predicts_2020))
 
   #create more readable output 
     tt_reg <- ttest_region %>%
-      dplyr::select(un_region, estimate, p.value, parameter, conf.low, conf.high) %>%
+      dplyr::select(region, estimate, p.value, parameter, conf.low, conf.high) %>%
       dplyr::rename(point_estimate = estimate, p_value = p.value, sample_size = parameter, low_bound = conf.low, upper_bound = conf.high) %>%
       mutate(sample_size = (sample_size+1)) %>% #since parameter is degrees of freedom not sample size
-      left_join(reg, by = "un_region") %>%
-      dplyr::select(un_region, sample_size, "mean(predicts_2020)", "mean(actuals_2020)", point_estimate, low_bound, upper_bound, p_value)
+      left_join(reg, by = "region") %>%
+      dplyr::select(region, sample_size, "mean(predicts_2020)", "mean(actuals_2020)", point_estimate, low_bound, upper_bound, p_value)
     
     tt_reg
 ```
 
-#### Box plot for region
-```{r}
-    region <- ggplot(cov_forecast_clean, aes(x = un_region, y = cov_delta_mean, color = un_region)) +
-      geom_boxplot()+
-      geom_point(size = 2, position = position_jitter(width = 0.2)) +
-      stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = c("lightcoral", "olivedrab", "seagreen4", "deepskyblue4", "magenta"))+
-      scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2))+
-      labs(title = "Region: Box plot of coverage delta by UNICEF region classification",
-           x = "Region",
-           y = "DTP3 Coverage delta",
-           colour = "Region")+
-      theme_light()+
-      theme(plot.title = element_text(face = "bold", size = 20),
-             legend.position = "none",
-             axis.text = element_text(size = 14),
-             axis.title.y = element_text(angle = 90),
-             axis.title = element_text(size = 17)
-             )+
-      scale_x_discrete(labels = wrap_format(12))+
-      geom_hline(aes(yintercept = 0), colour = "blue")+
-      geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -2, hjust = -0.2), size = 5, colour = "blue")
-    region
-    
-    ggsave(filename = "region_box_plot_dtp3.png", plot = region, 
-           width = 30, height = 15, units = "cm")
-
-```
-
-
 ### By income group
 ```{r}
-    ttest_income_group <- cov_forecast_clean %>%
+    ttest_income_group <- ttest_2020 %>%
       filter(!is.na(actuals_2020)) %>%
       filter(iso_code != "VEN") %>%
       group_by(income_group) %>% 
@@ -565,7 +528,7 @@ Remove datapoints:
                      paired = TRUE)))
 
   #create more readable output 
-    inc_grp <- cov_forecast_clean %>%
+    inc_grp <- ttest_2020 %>%
       filter(!is.na(actuals_2020)) %>%
       group_by(income_group) %>%
       dplyr::summarize(mean(actuals_2020), mean(predicts_2020))
@@ -580,36 +543,10 @@ Remove datapoints:
     tt_inc_grp
 ```
 
-```{r}
-  income_box <- ggplot(cov_forecast_clean, aes(x = income_group, y = cov_delta_mean, color = income_group))+
-      labs(title = "Income group: Box plot of coverage delta",
-           x = "Income group",
-           y = "DTP3 Coverage delta",
-           colour = "Income group")+
-      scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2))+
-      geom_boxplot()+
-      geom_point(size = 2, position = position_jitter(width = 0.2)) +
-      stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = c("red", "green", "cyan", "purple"))+
-      theme_light()+
-      theme(plot.title = element_text(face = "bold", size = 20),
-                legend.position = "none",
-                axis.text = element_text(size = 16),
-                axis.title.y = element_text(angle = 90),
-                axis.title = element_text(size = 18))+
-      geom_hline(aes(yintercept = 0), colour = "blue")+
-      geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -1, hjust = 0), size = 5, colour = "blue")
-
-      income_box
-      
-      ggsave(filename = "income_box_plot_dtp3.png", plot = income_box, 
-           width = 30, height = 15, units = "cm")
-
-```
-
 ### By Gavi status
 
 ```{r}
-    tt_gavi <- cov_forecast_clean %>%
+    tt_gavi <- ttest_2020 %>%
       filter(actuals_2020 >= 0) %>%
       group_by(gavi_status) %>% 
       do(tidy(t.test(.$actuals_2020, 
@@ -617,7 +554,7 @@ Remove datapoints:
                      alt = "two.sided", 
                      paired = TRUE)))
     
-    gav <- cov_forecast_clean %>%
+    gav <- ttest_2020 %>%
       filter(actuals_2020 >= 0) %>%
       group_by(gavi_status) %>%
       dplyr::summarize(mean(actuals_2020), mean(predicts_2020))
@@ -631,131 +568,129 @@ Remove datapoints:
       dplyr::select(gavi_status, sample_size, "mean(predicts_2020)", "mean(actuals_2020)", point_estimate, low_bound, upper_bound, p_value)
     
     tt_gavi_grp
-    
-    ##BINARY version
-    tt_gavi_bin <- cov_forecast_clean %>%
-      filter(actuals_2020 >= 0) %>%
-      group_by(gavi_binary) %>% 
-      do(tidy(t.test(.$actuals_2020, 
-                     .$predicts_2020, 
-                     alt = "two.sided", 
-                     paired = TRUE)))
-    
-    gav_bin <- cov_forecast_clean %>%
-      filter(actuals_2020 >= 0) %>%
-      group_by(gavi_binary) %>%
-      dplyr::summarize(mean(actuals_2020), mean(predicts_2020))
-    
-  #create more readable output 
-    tt_gavi_grp_bin <- tt_gavi_bin %>%
-      dplyr::select(gavi_binary, estimate, p.value, parameter, conf.low, conf.high) %>%
-      dplyr::rename(point_estimate = estimate, p_value = p.value, sample_size = parameter, low_bound = conf.low, upper_bound = conf.high) %>%
-      mutate(sample_size = (sample_size+1)) %>% #since parameter is degrees of freedom not sample size
-      left_join(gav_bin, by = "gavi_binary") %>%
-      dplyr::select(gavi_binary, sample_size, "mean(predicts_2020)", "mean(actuals_2020)", point_estimate, low_bound, upper_bound, p_value)
-    
-    tt_gavi_grp_bin
 
 ```
 
-#### Save T-test outputs
+## Interpretation outputs
+### Tables for greatest declines in coverage
 ```{r}
-    write.csv(tt_reg,"ttest_region_dtp3.csv", row.names = FALSE)
-    write.csv(tt_inc_grp,"ttest_income_dtp3.csv", row.names = FALSE)
-    write.csv(tt_gavi_grp,"ttest_gavi_dtp3.csv", row.names = FALSE)
-    write.csv(tt_gavi_grp_bin,"ttest_gavi_binary_dtp3.csv", row.names = FALSE)
-    write.csv(tt_total,"ttest_total_dtp3.csv", row.names = FALSE)
-    write.csv(tt_total_clean,"ttest_total_dtp3_clean.csv", row.names = FALSE)
+    cleaned_forecast_dtp1 <- ttest_2020 %>%
+      dplyr::select(c(country, iso_code, region, income_group, gavi_status, predicts_2020, actuals_2020)) %>%
+      mutate(cov_delta = actuals_2020 - predicts_2020) %>%
+      mutate(income_group = dplyr::recode_factor(income_group, 
+                                                  "Low income" = "LIC", 
+                                                  "Lower middle income" = "LMIC", 
+                                                  "Upper middle income" = "UMIC", 
+                                                  "High income" = "HIC")) %>%
+      mutate(region = factor(region,
+                             levels = c("Western Europe",
+                                        "Eastern Europe & Central Asia",
+                                        "Eastern & Southern Africa",
+                                        "Middle East & North Africa",
+                                        "West & Central Africa",
+                                        "South Asia",
+                                        "East Asia & Pacific",
+                                        "Latin America & Caribbean",
+                                        "North America"))) %>%
+      mutate(gavi_status = dplyr::recode_factor(gavi_status,
+                                                "Initial self-financing"= "Gavi - ISF",
+                                                "Preparatory transition phase" = "Gavi - PT",
+                                                "Accelerated transition phase" = "Gavi - AT",
+                                                "Fully self-financing" = "Gavi - FSF",
+                                                "Never Gavi" = "Never Gavi")) %>%
+      filter(!is.na(actuals_2020))
+      
+      cov_change_tab <- cleaned_forecast_dtp1 %>%
+        mutate(actuals_2020 = percent(actuals_2020, accuracy = 0.1),
+               predicts_2020 = percent(predicts_2020, accuracy = 0.1),
+               cov_delta = percent(cov_delta,accuracy = 0.1))
 ```
 
-
-## Outputs including missed immunisation quantification
+### Summary modelled impact on RI
 - Import UNWPP data
 - Multiply coverage delta estimates by surviving infant populations to calculate additional missed immunisations
 - Create summary output table including % coverage delta and  missed immunisations 
 ```{r}
-    file_path_unwpp <- here::here("data/unwpp.csv")
-    
-    unwpp <- file_path_unwpp %>%
-      rio::import(header = TRUE) %>%
-      tibble()
-    unwpp
-    
-    unwpp %<>%
-      mutate(iso_code = countrycode(sourcevar = Country, origin = "country.name", destination = "iso3c")) %>%
-      filter(!is.na(iso_code)) %>%
-      dplyr::select(-Country)
-    
-    cov_forecast %<>%
-      left_join(unwpp, by = "iso_code") %>%
-      dplyr::rename(surviving_infants = "Surviving infants") %>%
-      mutate(additional_missed = as.integer(surviving_infants*cov_delta_mean*-1),
-             additional_missed_low = as.integer(surviving_infants*cov_delta_low*-1),
-             additional_missed_high = as.integer(surviving_infants*cov_delta_high*-1),
-             expected_missed = as.integer((1-predicts_2020)*surviving_infants),
-             total_missed = as.integer((1-actuals_2020)*surviving_infants))
-    
-    dtp3_output <- cov_forecast %>%
-      mutate(actuals_2020 = percent(actuals_2020, accuracy = 0.1),
-             predicts_2020 = percent(predicts_2020, accuracy = 0.1),
-             cov_delta_mean = percent(cov_delta_mean,accuracy = 0.1)) %>%
-      dplyr::select(country, iso_code, region, un_region, income_group,
-                    gavi_status, gavi_binary, predicts_2020, predicts_lower,
-                    predicts_upper, datapoint_removed, ci_width,
-                    actuals_2020, cov_delta_mean, cov_delta_low, cov_delta_high,
-                    confident_95, surviving_infants, total_missed, expected_missed, 
-                    additional_missed, additional_missed_low, additional_missed_high) %>%
-      rename(Country = country,
-             "ISO code" = iso_code,
-             "UNICEF Region (unused)" = region,
-             "UN region" = un_region,
-             "Income group" = income_group,
-             "Gavi eligibility status" = gavi_status,
-             "Gavi eligibility (binary)"= gavi_binary,
-             "ARIMA modelled expected 2020 coverage (mean)" = predicts_2020,
-             "ARIMA modelled expected coverage (max 95% CI)" = predicts_lower,
-             "ARIMA modelled expected coverage (min 95% CI)" = predicts_upper,
-             "ARIMA coverage 95% CI" = ci_width,
-             "WUENIC reported 2020 coverage" = actuals_2020,
-             "Coverage delta" = cov_delta_mean,
-             "Coverage delta (max 95% CI)" = cov_delta_low,
-             "Coverage delta (min 95% CI)" = cov_delta_high,
-             "95% confident actuals outside expected" = confident_95,
-             "Surviving infants" = surviving_infants,
-             "Additional missed children (mean)" = additional_missed,
-             "Additional missed children (max 95% CI)" = additional_missed_low,
-             "Additional missed children (min 95% CI)" = additional_missed_high,
-             "Expected missed children" = expected_missed,
-             "Total missed children" = total_missed,
-             "ARIMA forecast unreliable" = datapoint_removed)
-    
-    #write.csv(cov_forecast,"dtp3_output.csv", row.names = FALSE)
-    write.csv(dtp3_output,"dtp3_summary_output.csv", row.names = FALSE)
+file_path_unwpp <- here::here("data/unwpp.csv")
+
+unwpp <- file_path_unwpp %>%
+  rio::import(header = TRUE) %>%
+  tibble()
+unwpp
+
+unwpp %<>%
+  mutate(iso_code = countrycode(sourcevar = Country, origin = "country.name", destination = "iso3c")) %>%
+  filter(!is.na(iso_code)) %>%
+  dplyr::select(-Country)
+
+cov_forecast %<>%
+  left_join(unwpp, by = "iso_code") %>%
+  dplyr::rename(surviving_infants = "Surviving infants") %>%
+  mutate(additional_missed = as.integer(surviving_infants*cov_delta_mean*-1),
+         expected_missed = as.integer((1-predicts_2020)*surviving_infants),
+         total_missed = as.integer((1-actuals_2020)*surviving_infants),
+         unreliable_flag = ifelse(country %in% removed_dat$country, TRUE, FALSE))
+
+appendix_output <- cov_forecast %>%
+  mutate(actuals_2020 = percent(actuals_2020, accuracy = 0.1),
+         predicts_2020 = percent(predicts_2020, accuracy = 0.1),
+         cov_delta_mean = percent(cov_delta_mean,accuracy = 0.1)) %>%
+  rename(Country = country,
+         "ISO code" = iso_code,
+         Region = region,
+         "Income group" = income_group,
+         "Gavi eligibility status" = gavi_status,
+         "ARIMA modelled expected 2020 coverage" = predicts_2020,
+         "WUENIC reported 2020 coverage" = actuals_2020,
+         "Coverage delta" = cov_delta_mean,
+         "Surviving infants" = surviving_infants,
+         "Additional missed children" = additional_missed,
+         "Expected missed children" = expected_missed,
+         "Total missed children" = total_missed,
+         "Data unreliable flag" = unreliable_flag)
+
+write.csv(appendix_output,"SupplementaryFiles_DTP1_coverage_impact.csv", row.names = FALSE)
+
 ```
 
 ### Summary modelling output for Appendix
-Produce table showing order and fit of all ARIMA models per country
 ```{r}
-     order <- output %>%
-      filter(plot_key == "Forecast") %>%
-      dplyr::select(country, iso_code) %>%
-      left_join(model, by = "iso_code") %>%
-      #inner_join(cov_2020, by = c("iso_code", "country")) %>%
-      as_tibble() %>%
-      mutate(mean = percent(as.numeric(mean), accuracy = 0.1),
-             lower = percent(as.numeric(lower), accuracy = 0.1),
-             upper = percent(as.numeric(upper),accuracy = 0.1),
-             #actuals_2020 = percent(as.numeric(actuals_2020),accuracy = 0.1),
-             #cov_delta = percent((as.numeric(actuals_2020) - as.numeric(mean)), accuracy = 0.1)
-             )%>%
-      rename(Country = country,
-             "ISO code" = iso_code,
-             "ARIMA model fit" = method,
-             "Expected 2020 coverage" = mean,
-             "Expected: 95% Confidence interval - lower bound" = lower,
-             "Expected: 95% Confidence interval - upper bound" = upper)
-    
-    order <- apply(order,2,as.character)
-    
-    write.csv(order,"DTP3_ARIMA_models.csv", row.names = FALSE)
+ order <- output %>%
+  filter(plot_key == "Forecast") %>%
+  dplyr::select(country, iso_code) %>%
+  left_join(model, by = "iso_code") %>%
+  #inner_join(cov_2020, by = c("iso_code", "country")) %>%
+  as_tibble() %>%
+  mutate(mean = percent(as.numeric(mean), accuracy = 0.1),
+         lower = percent(as.numeric(lower), accuracy = 0.1),
+         upper = percent(as.numeric(upper),accuracy = 0.1),
+         #actuals_2020 = percent(as.numeric(actuals_2020),accuracy = 0.1),
+         #cov_delta = percent((as.numeric(actuals_2020) - as.numeric(mean)), accuracy = 0.1)
+         )%>%
+  rename(Country = country,
+         "ISO code" = iso_code,
+         "ARIMA model fit" = method,
+         "Expected 2020 coverage" = mean,
+         "Expected: 95% Confidence interval - lower bound" = lower,
+         "Expected: 95% Confidence interval - upper bound" = upper,
+         #"WUENIC 2020 reported coverage" = actuals_2020,
+         #"Coverage delta" = cov_delta
+         )
+
+order <- apply(order,2,as.character)
+
+write.csv(order,"SupplementaryFiles_DTP1_coverage_model.csv", row.names = FALSE)
 ```
+
+### Save files
+```{r}
+    write.csv(cov_forecast,"forecast_dtp1.csv", row.names = FALSE)
+    write.csv(tt_reg,"ttest_region_dtp1.csv", row.names = FALSE)
+    write.csv(tt_inc_grp,"ttest_income_dtp1.csv", row.names = FALSE)
+    write.csv(tt_gavi_grp,"ttest_gavi_dtp1.csv", row.names = FALSE)
+    write.csv(tt_total,"ttest_total_dtp1.csv", row.names = FALSE)
+    write.csv(tt_total_clean,"ttest_total_dtp1_clean.csv", row.names = FALSE)
+    write.csv(cleaned_forecast_dtp1, "cleaned_forecast_dtp1.csv", row.names = FALSE)
+    write.csv(cov_change_tab,"paper_coverage_table_dtp1.csv", row.names = FALSE)
+```
+
