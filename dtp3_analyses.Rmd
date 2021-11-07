@@ -38,11 +38,26 @@ Import data:
 - Income group classification from World Bank <br>
 - Gavi classification pre-compiled dataset from Gavi website country documents and Eligibility policy <br>
 ```{r}
-    file_path_dtp3 <- here::here("data", "dtp3.csv")
+    file_path_dtp3 <- here::here("data", "dtp3_oct.csv")
     data_raw <- file_path_dtp3 %>%
       rio::import(header = TRUE) %>%
       tibble()
     data_raw
+    
+    file_path_dtp3_old <- here::here("data", "dtp3.csv")
+    data_old<- file_path_dtp3_old %>%
+      rio::import(header = TRUE) %>%
+      tibble()
+    data_old
+    
+    #######
+    data_old %<>%
+      dplyr::rename(region = unicef_region, iso_code = iso3, coverage = "2020")
+    
+    data_old %<>% 
+      select(iso_code, coverage) %>%
+      filter(!is.na(coverage))
+    #######
     
     file_path_wb <- here::here("data", "wb_ig.csv")
     income <- file_path_wb %>%
@@ -311,9 +326,13 @@ Output shown for 15 countries at a time - changeable by changing the paginate ou
     plot_dat <- output %>%
       dplyr::select(country, iso_code, year, coverage, plot_key) %>%
       rbind(plot_dat_key) %>%
-      mutate(shape = ifelse(plot_key == "Actuals", 4, 19))  
+      mutate(shape = ifelse(plot_key == "Actuals", 4, 19)) 
+    
+        ####new countries reported in October####
+    new_dat_oct <- plot_dat %>%
+      filter(!iso_code %in% data_old$iso_code)
 
-    vis = ggplot(data = plot_dat, aes(x = year(year), y = coverage, color = plot_key))+
+    vis = ggplot(data = new_dat_oct, aes(x = year(year), y = coverage, color = plot_key))+
       geom_point()+
       geom_smooth(colour = "lightgrey")+
       labs(title = "DTP3: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
@@ -333,7 +352,7 @@ Output shown for 15 countries at a time - changeable by changing the paginate ou
       scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
                          limits = c(0.3,1),
                          n.breaks = 6)+
-      facet_wrap_paginate(~country, nrow = 3, ncol = 5, scales = "fixed", page = 9, labeller = label_wrap_gen(25))
+      facet_wrap_paginate(~country, nrow = 3, ncol = 5, scales = "fixed", page = 3, labeller = label_wrap_gen(25))
     vis
     
 ```
@@ -363,6 +382,8 @@ For option (3):
       spread(year, coverage) %>% 
       dplyr::rename(Y2019 = "2019-12-31", Y2020 = "2020-12-31") %>% 
       mutate(delta = Y2020-Y2019)
+
+    dtp3_change
 
       #write.csv(dtp3_change,"Forecast_improvement_dtp3.csv", row.names = FALSE)
 ```
@@ -598,7 +619,6 @@ Remove datapoints:
                 axis.title = element_text(size = 18))+
       geom_hline(aes(yintercept = 0), colour = "blue")+
       geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -1, hjust = 0), size = 5, colour = "blue")
-
       income_box
       
       ggsave(filename = "income_box_plot_dtp3.png", plot = income_box, 
