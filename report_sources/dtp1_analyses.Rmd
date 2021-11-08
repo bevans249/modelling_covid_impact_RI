@@ -441,21 +441,51 @@ dtp1_change
 
 Countries considered as potential unreliable estimated coverage estimates are:
 
-(1) Criteria one - <br>
-- *Solomon Islands*: high variance over time. WUENIC report that "increase in estimated coverage from 2018 [to 2019] is unlikely but exceptionally allowed given the small birth cohort size" - given such uncertainty and lack of confidence, removed
-- *Suriname*: recent trends volatile, and WUENIC report "recent survey results suggest lower levels of coverage than that reported by the programme during the past 10 years. Further investigation to understand underlying differences is warranted, and WHO and UNICEF recommend a high-quality independent empirical assessment to confirm reported levels of coverage" as well as stockouts in 2019 and 2017 (one month), syringe stockout in 2018 (four months)
+(1) Criteria one
 
-(2) Criteria two - <br>
-- *Haiti*: Model fit skewed heavily by 2019 coverage estimate, which fell due to socio-political disturbances
-- *Libya*: Model fit skewed heavily by 2018-2019 coverage estimates, which were all reduced 25 percentage points vs. country reports based on reported 3-month stockout, and therefore are not strongly tied to surveys
-- *Samoa*: Model fit skewed heavily by 2018-2019 coverage estimates (much lower than historical trend). WUENIC note vaccine interruption in 2018 due public hesitancy, and that 2019 data is uncertain
-- *Brazil*: estimate driven by fit to 2019 coverage (drop)which was > 15 percentage point drop in a year), and WUENIC report "no nationally representative household survey within last 5 years" so unclear how trend will evolve or if it will be confirmed
+- *Solomon Islands*: high variance over time. WUENIC report that "increase in
+  estimated coverage from 2018 [to 2019] is unlikely but exceptionally allowed
+  given the small birth cohort size" - given such uncertainty and lack of
+  confidence, removed
 
-(3) Criteria three - <br>
-- *Venezuela*: +6pp improvement programmatically unlikely. WUENIC coverage estimates reflect uncertainty due to civil unrest
-- *El Salvador*: +6pp improvement programmatically unlikely. WUENIC report no survey in last 5 years and need for high-quality survey
-- *Jordan*: +7pp improvement on 2019 coverage (from 2018-2019 there was a 10pp decrease in coverage, which was not reported as an exceptional circumstance) programmatically unlikely. 
-<br>
+- *Suriname*: recent trends volatile, and WUENIC report "recent survey results
+  suggest lower levels of coverage than that reported by the programme during
+  the past 10 years. Further investigation to understand underlying differences
+  is warranted, and WHO and UNICEF recommend a high-quality independent
+  empirical assessment to confirm reported levels of coverage" as well as
+  stockouts in 2019 and 2017 (one month), syringe stockout in 2018 (four months)
+
+(2) Criteria two
+
+- *Haiti*: Model fit skewed heavily by 2019 coverage estimate, which fell due to
+  socio-political disturbances
+
+- *Libya*: Model fit skewed heavily by 2018-2019 coverage estimates, which were
+  all reduced 25 percentage points vs. country reports based on reported 3-month
+  stockout, and therefore are not strongly tied to surveys
+
+- *Samoa*: Model fit skewed heavily by 2018-2019 coverage estimates (much lower
+  than historical trend). WUENIC note vaccine interruption in 2018 due public
+  hesitancy, and that 2019 data is uncertain
+
+- *Brazil*: estimate driven by fit to 2019 coverage (drop)which was > 15
+  percentage point drop in a year), and WUENIC report "no nationally
+  representative household survey within last 5 years" so unclear how trend will
+  evolve or if it will be confirmed
+
+(3) Criteria three
+
+- *Venezuela*: +6pp improvement programmatically unlikely. WUENIC coverage
+  estimates reflect uncertainty due to civil unrest
+
+- *El Salvador*: +6pp improvement programmatically unlikely. WUENIC report no
+  survey in last 5 years and need for high-quality survey
+
+- *Jordan*: +7pp improvement on 2019 coverage (from 2018-2019 there was a 10pp
+decrease in coverage, which was not reported as an exceptional circumstance)
+programmatically unlikely
+
+
 #### Plot of removed datapoints
 
 ```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1}
