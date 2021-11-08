@@ -5,6 +5,15 @@ date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
     code_folding: "show"
+    toc: TRUE
+    toc_depth: 4
+    toc_float: TRUE
+    toc_collapse: FALSE
+    number_sections: TRUE
+    highlight: pygments
+    theme: spacelab
+params:
+  data: "dtp1"
 ---
 
 ```{r setup, include=FALSE}
@@ -20,14 +29,14 @@ library(rio)
 library(magrittr)
 library(timetk)
 library(tidymodels)
-library(lubridate)
-library(ggplot2)
+# library(lubridate)
+# library(ggplot2)
 library(ggforce)
 library(urca)
 library(tseries)
 library(forecast)
 library(reshape2)
-library(dplyr)
+#library(dplyr)
 library(data.table)
 library(countrycode)
 ```
@@ -38,6 +47,7 @@ Import data:
 
 - Coverage data from WUENIC for 2000-2020
 
+
 - Income group classification from World Bank
 
 - Gavi classification pre-compiled dataset from Gavi website country documents
@@ -45,14 +55,23 @@ Import data:
 
 ```{r}
 
-file_path_dtp1 <- here::here("data", "dtp1_oct.csv")
-data_raw <- file_path_dtp1 %>%
+if (params$data == "dtp1") {
+  file_path <- here::here("data", "dtp1_oct.csv")
+  file_path_old <- here::here("data", "dtp1.csv")
+} else if (params$data == "dtp3") {
+  file_path <- here::here("data", "dtp3_oct.csv")
+  file_path_old <- here::here("data", "dtp3.csv")
+} else {
+  msg <- sprintf("Unknown dataset requested: %s", params$data)
+  stop(msg)
+}
+
+data_raw <- file_path %>%
   rio::import(header = TRUE) %>%
   tibble()
 data_raw
 
-file_path_dtp1_old <- here::here("data", "dtp1.csv")
-data_old <- file_path_dtp1_old %>%
+data_old <- file_path_old %>%
   rio::import(header = TRUE) %>%
   tibble()
 data_old
@@ -281,7 +300,7 @@ Plot single country output:
 country_dat <- output %>%           
   filter(country == "Jordan") # Replace name by country of interest
 
-country_vis = ggplot(data = country_dat, aes(x = year(year), y = coverage, color = ARIMA_model)) +
+country_vis <- ggplot(data = country_dat, aes(x = year(year), y = coverage, color = ARIMA_model)) +
   geom_point() +
   geom_smooth(colour = "darkgrey") +
   labs(title = "Jordan: WUENIC reported DTP1 coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
@@ -320,7 +339,7 @@ pop_comb <- pop_dat %>%
   rbind(pop_dat_2020) %>%
   mutate(shape = ifelse(plot_key == "Actuals", 4, 19))
 
-pop_vis = ggplot(data = pop_dat, aes(x = year(year), y = coverage, color = plot_key)) +
+pop_vis <- ggplot(data = pop_dat, aes(x = year(year), y = coverage, color = plot_key)) +
   geom_point() +
   geom_point(data = pop_dat_2020, aes(x = year(year), y = coverage, color = plot_key), shape = 4) +
   geom_smooth(colour = "darkgrey") +
@@ -502,11 +521,22 @@ programmatically unlikely
 
 #### Plot of removed datapoints
 
-```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1}
+```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1, fig.width = 10, fig.height = 10, out.width = "100%"}
 
-removed_countries <- c("Haiti", "Libya", "Samoa", "Solomon Islands", "Brazil",
-                       "El Salvador", "Jordan", "Venezuela (Bolivarian Republic of)",
-                       "Suriname")
+removed_countries <- NULL
+
+# removed countries for DTP1
+if (params$data == "dtp1") {
+  removed_countries <- c("Haiti", "Libya", "Samoa", "Solomon Islands", "Brazil",
+                         "El Salvador", "Jordan", "Venezuela (Bolivarian Republic of)",
+                         "Suriname")
+}
+
+# removed countries for DTP3
+if (params$data == "dtp3") {
+  removed_countries <- c("Haiti", "Jordan", "Venezuela (Bolivarian Republic of)")
+}
+
 
 removed_dat <- output %>%
   filter(country %in% removed_countries)
@@ -737,6 +767,7 @@ tt_inc_grp
 ```
 
 ```{r}
+
 income_box <- ggplot(cov_forecast_clean, aes(x = income_group, y = cov_delta_mean, color = income_group)) +
   labs(title = "Income group: Box plot of coverage delta",
        x = "Income group",
@@ -939,7 +970,8 @@ order <- output %>%
   as_tibble() %>%
   mutate(mean = percent(as.numeric(mean), accuracy = 0.1),
          lower = percent(as.numeric(lower), accuracy = 0.1),
-         upper = percent(as.numeric(upper),accuracy = 0.1)) %>%
+         upper = percent(as.numeric(upper),accuracy = 0.1),
+         method = as.character(method)) %>%
   rename(Country = country,
          "ISO code" = iso_code,
          "ARIMA model fit" = method,
@@ -947,10 +979,9 @@ order <- output %>%
          "Expected: 95% Confidence interval - lower bound" = lower,
          "Expected: 95% Confidence interval - upper bound" = upper)
 
-order <- apply(order, 2, as.character)
-
 write.csv(
   order,
   here::here("outputs", "csv", "DTP1_ARIMA_models.csv"),
   row.names = FALSE)
+
 ```
