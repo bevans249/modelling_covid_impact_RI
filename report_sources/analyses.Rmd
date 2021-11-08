@@ -368,8 +368,15 @@ pop_vis <- ggplot(data = pop_dat, aes(x = year(year), y = coverage, color = plot
   facet_wrap(~country, ncol = 4, scales = "fixed", labeller = label_wrap_gen(25))
 pop_vis
 
-#save file
-ggsave(filename = here::here("figures", "forecast_pop_dtp1.png"),
+
+# make sure output folder exists
+fig_folder <- here::here("figures", params$data)
+if (!dir.exists(fig_folder)) {
+  dir.create(fig_folder)
+}
+
+# save file 
+ggsave(filename = here::here(fig_folder, "forecast_pop.png"),
        plot = pop_vis, 
        width = 30, height = 10, units = "cm")
 ```
@@ -426,7 +433,7 @@ vis
 ### Save output as file
 
 ```{r, message = FALSE, warnings = FALSE}
-ggsave(filename = here::here("figures", "forecast_dtp1.png"),
+ggsave(filename = here::here(fig_folder, "forecast.png"),
        plot = vis, 
        width = 25, height = 20, units = "cm")
 ```
@@ -566,7 +573,7 @@ removed_vis <- ggplot(data = removed_dat, aes(x = year(year), y = coverage, colo
 removed_vis
 
 # save file
-ggsave(filename = here::here("figures", "removed_countries_dtp1.png"),
+ggsave(filename = here::here(fig_folder, "removed_countries.png"),
        plot = removed_vis, 
        width = 30, height = 30, units = "cm")
 ```
@@ -726,7 +733,7 @@ region <- ggplot(cov_forecast_clean, aes(x = un_region, y = cov_delta_mean, colo
   geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -2, hjust = -0.2), size = 5, colour = "blue")
 region
 
-ggsave(filename = here::here("figures", "region_box_plot_dtp1.png"),
+ggsave(filename = here::here(fig_folder, "region_box_plot.png"),
        plot = region, 
        width = 30, height = 15, units = "cm")
 
@@ -787,7 +794,7 @@ income_box <- ggplot(cov_forecast_clean, aes(x = income_group, y = cov_delta_mea
   geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -1, hjust = 0), size = 5, colour = "blue")
 income_box
 
-ggsave(filename = here::here("figures", "income_box_plot_dtp1.png"),
+ggsave(filename = here::here(fig_folder, "income_box_plot.png"),
        plot = income_box, 
        width = 30, height = 15, units = "cm")
 
@@ -858,29 +865,37 @@ tt_gavi_grp_bin
 #### Save t-test outputs
 
 ```{r}
+
+# make sure output folder exists
+csv_folder <- here::here("outputs", "csv", params$data)
+if (!dir.exists(csv_folder)) {
+  dir.create(csv_folder)
+}
+
+# save files
 write.csv(
   tt_reg,
-  here::here("outputs", "csv", "ttest_region_dtp1.csv"),
+  here::here(csv_folder, "ttest_region_dtp1.csv"),
   row.names = FALSE)
 write.csv(
   tt_inc_grp,
-  here::here("outputs", "csv", "ttest_income_dtp1.csv"),
+  here::here(csv_folder, "ttest_income_dtp1.csv"),
   row.names = FALSE)
 write.csv(
   tt_gavi_grp,
-  here::here("outputs", "csv", "ttest_gavi_dtp1.csv"),
+  here::here(csv_folder, "ttest_gavi_dtp1.csv"),
   row.names = FALSE)
 write.csv(
   tt_gavi_grp_bin,
-  here::here("outputs", "csv", "ttest_gavi_binary_dtp1.csv"),
+  here::here(csv_folder, "ttest_gavi_binary_dtp1.csv"),
   row.names = FALSE)
 write.csv(
   tt_total,
-  here::here("outputs", "csv", "ttest_total_dtp1.csv"),
+  here::here(csv_folder, "ttest_total_dtp1.csv"),
   row.names = FALSE)
 write.csv(
   tt_total_clean,
-  here::here("outputs", "csv", "ttest_total_dtp1_clean.csv"),
+  here::here(csv_folder, "ttest_total_dtp1_clean.csv"),
   row.names = FALSE)
 ```
 
@@ -953,7 +968,7 @@ dtp1_output <- cov_forecast %>%
 
 write.csv(
   dtp1_output,
-  here::here("outputs", "csv", "dtp1_summary_output.csv"),
+  here::here(csv_folder, "dtp1_summary_output.csv"),
   row.names = FALSE)
 ```
 
@@ -981,7 +996,7 @@ order <- output %>%
 
 write.csv(
   order,
-  here::here("outputs", "csv", "DTP1_ARIMA_models.csv"),
+  here::here(csv_folder, "DTP1_ARIMA_models.csv"),
   row.names = FALSE)
 
 ```
