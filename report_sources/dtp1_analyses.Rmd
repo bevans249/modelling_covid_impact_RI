@@ -1,7 +1,7 @@
 ---
 title: "DTP1 analyses for COVID-19 impact on RI modelling"
 author: "Beth Evans and Thibaut Jombart"
-date: "07/10/2021"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
     code_folding: "show"
@@ -33,10 +33,16 @@ library(countrycode)
 ```
 
 ### Load data
+
 Import data:
-- Coverage data from WUENIC for 2000-2020 <br>
-- Income group classification from World Bank <br>
-- Gavi classification pre-compiled dataset from Gavi website country documents and Eligibility policy <br>
+
+- Coverage data from WUENIC for 2000-2020
+
+- Income group classification from World Bank
+
+- Gavi classification pre-compiled dataset from Gavi website country documents
+  and Eligibility policy
+
 ```{r}
 file_path_dtp1 <- here::here("data", "dtp1_oct.csv")
 data_raw <- file_path_dtp1 %>%
@@ -73,13 +79,16 @@ gavi
 ```
 
 ### Clean data
+
 Steps taken:
+
 - rename variables 
 - reshape data to long vs. wide format
 - add categorisation columns (income group, region, Gavi eligibility status)
 - select relevant columns only 
+
 ```{r}
-##Clean and reshape 2000-2019 coverage data
+# Clean and reshape 2000-2019 coverage data
 data_raw %<>%
   dplyr::rename(region = unicef_region, iso_code = iso3)
 
@@ -89,13 +98,13 @@ data_long <- data_raw %>%
 names(data_long) <- tolower(names(data_long))
 data_long
 
-##Clean 2020 coverage data (actuals)
+# Clean 2020 coverage data (actuals)
 cov_2020 <- data_raw %>%
   dplyr::select(iso_code, country, '2020') %>%
   dplyr::rename(actuals_2020 = '2020') %>%
   mutate(actuals_2020 = actuals_2020 / 100)
 
-##Join 'income' classification to dataset
+# Join 'income' classification to dataset
 income %<>% 
   filter(datayear == "2020") %>%
   dplyr::rename(iso_code = wb_code) %>%
@@ -106,7 +115,7 @@ data_long %<>%
   inner_join(income, by = "iso_code")
 data_long
 
-##Join 'Gavi' classification to dataset
+# Join 'Gavi' classification to dataset
 gavi %<>% 
   filter(Year == "2020") %>%
   dplyr::rename(iso_code = "WB CC",
@@ -121,7 +130,7 @@ data_long %<>%
   mutate(gavi_binary = replace_na(gavi_binary, "Never Gavi"),
          gavi_status = replace_na(gavi_status, "Never Gavi")) 
 
-##Clean consolidated projection dataset
+# Clean consolidated projection dataset
 x <- data_long %>%
   mutate(year = as.integer(year), coverage = coverage / 100) %>%
   dplyr::select(-vaccine) %>%
@@ -166,7 +175,7 @@ follows:
 
 - p = number of autoregressive terms - based on minimisation of the AIC
 - d = number of non-seasonal differences needed for stationarity - based on conducting KPSS tests
-- q = number of lagged forecast errors in the prediction equation - based on minimisation of the AIC <br>
+- q = number of lagged forecast errors in the prediction equation - based on minimisation of the AIC
 
 and (b) predict 2020 coverage based on this selected model.
 
@@ -174,7 +183,9 @@ and (b) predict 2020 coverage based on this selected model.
 
 ```{r}
 ts_df <- ts(reshape2::dcast(x, year ~ iso_code), start = 2000, freq = 1)
-ts_forecast <- lapply(ts_df, function(y) forecast(auto.arima(y, seasonal = FALSE), h = 1, level = 95))
+ts_forecast <- lapply(ts_df,
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE), h = 1, level = 95))
 
 model <- as.data.frame(do.call(rbind, ts_forecast)) 
 model=model[-1,]
@@ -269,17 +280,17 @@ Plot single country output:
 country_dat <- output %>%           
   filter(country == "Jordan") # Replace name by country of interest
 
-country_vis = ggplot(data = country_dat, aes(x = year(year), y = coverage, color = ARIMA_model))+
-  geom_point()+
-  geom_smooth(colour = "darkgrey")+
+country_vis = ggplot(data = country_dat, aes(x = year(year), y = coverage, color = ARIMA_model)) +
+  geom_point() +
+  geom_smooth(colour = "darkgrey") +
   labs(title = "Jordan: WUENIC reported DTP1 coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
        x = "Year",
-       y = "Coverage (%)")+
+       y = "Coverage (%)") +
   scale_colour_manual(name = "Datapoint:", 
                       values = c("orange", "dark grey"), 
-                      labels = c("WUENIC reported coverage", "ARIMA modelled coverage"))+
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1L))+
-  theme_bw()+
+                      labels = c("WUENIC reported coverage", "ARIMA modelled coverage")) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L)) +
+  theme_bw() +
   theme(legend.position = 'bottom', 
         legend.text = element_text(size = 9),
         legend.spacing = unit(0.05, 'cm'),
@@ -308,14 +319,14 @@ pop_comb <- pop_dat %>%
   rbind(pop_dat_2020) %>%
   mutate(shape = ifelse(plot_key == "Actuals", 4, 19))
 
-pop_vis = ggplot(data = pop_dat, aes(x = year(year), y = coverage, color = plot_key))+
-  geom_point()+
-  geom_point(data = pop_dat_2020, aes(x = year(year), y = coverage, color = plot_key), shape = 4)+
-  geom_smooth(colour = "darkgrey")+
+pop_vis = ggplot(data = pop_dat, aes(x = year(year), y = coverage, color = plot_key)) +
+  geom_point() +
+  geom_point(data = pop_dat_2020, aes(x = year(year), y = coverage, color = plot_key), shape = 4) +
+  geom_smooth(colour = "darkgrey") +
   labs(title = "DTP1: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
        y = "Coverage (%)",
-       x = "Year")+
-  theme_bw()+
+       x = "Year") +
+  theme_bw() +
   theme(legend.position = 'bottom', 
         legend.text = element_text(size = 14),
         legend.spacing = unit(0.05, 'cm'),
@@ -324,16 +335,16 @@ pop_vis = ggplot(data = pop_dat, aes(x = year(year), y = coverage, color = plot_
         axis.text.x = element_text(angle=45,hjust = 1, size = 14),
         axis.text.y = element_text(size = 14), 
         strip.text.x = element_text(size = 14), 
-        axis.title = element_text(size = 18))+
+        axis.title = element_text(size = 18)) +
   scale_colour_manual(name = "Datapoint:", 
                       values = c("blue", "orange", "darkgrey"), 
                       labels = c("WUENIC reported 2020 coverage",
                                  "ARIMA modelled 2020 coverage",
-                                 "Historic WUENIC coverage"))+
-  guides(color = guide_legend(reverse=TRUE))+
+                                 "Historic WUENIC coverage")) +
+  guides(color = guide_legend(reverse=TRUE)) +
   scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
                      limits = c(0.25,1),
-                     n.breaks = 5)+
+                     n.breaks = 5) +
   facet_wrap(~country, ncol = 4, scales = "fixed", labeller = label_wrap_gen(25))
 pop_vis
 
@@ -364,28 +375,28 @@ plot_dat <- output %>%
 new_dat_oct <- plot_dat %>%
   filter(!iso_code %in% data_old$iso_code)
 
-vis = ggplot(data = new_dat_oct, aes(x = year(year), y = coverage, color = plot_key))+
-  geom_point()+
-  geom_smooth(colour = "lightgrey")+
+vis = ggplot(data = new_dat_oct, aes(x = year(year), y = coverage, color = plot_key)) +
+  geom_point() +
+  geom_smooth(colour = "lightgrey") +
   labs(title = "DTP1: WUENIC reported coverage 2000-2019 and ARIMA-modelled expected 2020 coverage", 
        y = "Coverage (%)",
-       x = "Year")+
-  theme_bw()+
+       x = "Year") +
+  theme_bw() +
   theme(legend.position = 'bottom', 
         legend.text = element_text(size = 10),
         legend.spacing = unit(0.05, 'cm'),
         legend.title = element_text(face = "bold"),
         plot.title = element_text(face = "bold", size = 11),
-        axis.text.x = element_text(angle=45,hjust = 1))+
+        axis.text.x = element_text(angle=45,hjust = 1)) +
   scale_colour_manual(name = "Datapoint:", 
                       values = c("blue", "orange", "darkgrey"), 
                       labels = c("WUENIC reported 2020 coverage",
                                  "ARIMA modelled 2020 coverage",
-                                 "Historic WUENIC coverage"))+
-  guides(color = guide_legend(reverse=TRUE))+
+                                 "Historic WUENIC coverage")) +
+  guides(color = guide_legend(reverse=TRUE)) +
   scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
                      limits = c(0.3,1),
-                     n.breaks = 6)+
+                     n.breaks = 6) +
   facet_wrap_paginate(~country, nrow = 3, ncol = 5, scales = "fixed", page = 3, labeller = label_wrap_gen(25))
 vis
 
@@ -400,7 +411,9 @@ ggsave(filename = here::here("figures", "forecast_dtp1.png"),
        width = 25, height = 20, units = "cm")
 ```
 
-## Conduct T-tests for predicted vs. observed coverage
+
+
+## Conduct t-tests for predicted vs. observed coverage
 
 ### Remove unreliable expected coverage estimates
 
@@ -441,7 +454,7 @@ dtp1_change
 
 Countries considered as potential unreliable estimated coverage estimates are:
 
-(1) Criteria one
+**(1) Criteria one**
 
 - *Solomon Islands*: high variance over time. WUENIC report that "increase in
   estimated coverage from 2018 [to 2019] is unlikely but exceptionally allowed
@@ -455,7 +468,7 @@ Countries considered as potential unreliable estimated coverage estimates are:
   empirical assessment to confirm reported levels of coverage" as well as
   stockouts in 2019 and 2017 (one month), syringe stockout in 2018 (four months)
 
-(2) Criteria two
+**(2) Criteria two**
 
 - *Haiti*: Model fit skewed heavily by 2019 coverage estimate, which fell due to
   socio-political disturbances
@@ -473,7 +486,7 @@ Countries considered as potential unreliable estimated coverage estimates are:
   representative household survey within last 5 years" so unclear how trend will
   evolve or if it will be confirmed
 
-(3) Criteria three
+**(3) Criteria three**
 
 - *Venezuela*: +6pp improvement programmatically unlikely. WUENIC coverage
   estimates reflect uncertainty due to civil unrest
@@ -489,18 +502,21 @@ programmatically unlikely
 #### Plot of removed datapoints
 
 ```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1}
-removed_dat <- output %>%
-  filter(country == "Haiti" | country == "Libya" | country == "Samoa" | country == "Solomon Islands" 
-         | country == "Brazil" | country == "El Salvador" | country == "Jordan" 
-         | country == "Venezuela (Bolivarian Republic of)" | country == "Suriname")    
 
-removed_vis = ggplot(data = removed_dat, aes(x = year(year), y = coverage, color = plot_key))+
-  geom_point()+
-  geom_smooth(colour = "darkgrey")+
+removed_countries <- c("Haiti", "Libya", "Samoa", "Solomon Islands", "Brazil",
+                       "El Salvador", "Jordan", "Venezuela (Bolivarian Republic of)",
+                       "Suriname")
+
+removed_dat <- output %>%
+  filter(country %in% removed_countries)
+
+removed_vis <- ggplot(data = removed_dat, aes(x = year(year), y = coverage, color = plot_key)) +
+  geom_point() +
+  geom_smooth(colour = "darkgrey") +
   labs(title = "DTP1: Countries removed from further analysis due to unreliable datapoints", 
        y = "Coverage (%)",
-       x = "Year")+
-  theme_bw()+
+       x = "Year") +
+  theme_bw() +
   theme(legend.position = 'bottom', 
         legend.text = element_text(size = 14),
         legend.spacing = unit(0.05, 'cm'),
@@ -509,16 +525,16 @@ removed_vis = ggplot(data = removed_dat, aes(x = year(year), y = coverage, color
         axis.text.x = element_text(angle=45,hjust = 1, size = 14),
         axis.text.y = element_text(size = 14), 
         strip.text.x = element_text(size = 14), 
-        axis.title = element_text(size = 18))+
+        axis.title = element_text(size = 18)) +
   scale_colour_manual(name = "Datapoint:", 
                       values = c("orange", "darkgrey"), 
-                      labels = c("ARIMA modelled 2020 coverage", "Historic WUENIC coverage"))+
-  theme(axis.text.x = element_text(angle=45,hjust = 1))+
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1L))+
+                      labels = c("ARIMA modelled 2020 coverage", "Historic WUENIC coverage")) +
+  theme(axis.text.x = element_text(angle=45,hjust = 1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L)) +
   facet_wrap(~country, scales = "free", labeller = label_wrap_gen(width = 25))
 removed_vis
 
-#save file
+# save file
 ggsave(filename = here::here("figures", "removed_countries_dtp1.png"),
        plot = removed_vis, 
        width = 30, height = 30, units = "cm")
@@ -526,11 +542,8 @@ ggsave(filename = here::here("figures", "removed_countries_dtp1.png"),
 
 <br>
 Remove datapoints:
-```{r}
 
-removed_countries <- c("Haiti", "Libya", "Samoa", "Solomon Islands", "Brazil",
-                       "El Salvador", "Jordan", "Venezuela (Bolivarian Republic of)",
-                       "Suriname")
+```{r}
 
 cov_forecast_clean <- cov_forecast %>%
   dplyr::filter(!country %in% removed_countries)
@@ -540,8 +553,10 @@ cov_forecast %<>%
 
 ```
 
-### T-test: For all countries combined
+### t-test: For all countries combined
+
 ```{r}
+
 ttest_cov_drop <- t.test(cov_forecast_clean$actuals_2020,
                          cov_forecast_clean$predicts_2020,
                          paired = TRUE,
@@ -563,7 +578,7 @@ total_test %<>%
          conf.low = (estimate + conf.int),
          conf.high = (estimate - conf.int))
 
-#Create readable output of ttest results
+# Create readable output of ttest results
 tt_total <- total_test %>%
   dplyr::select(estimate, p.value, parameter, conf.low, conf.high) %>%
   dplyr::rename(point_estimate = estimate,
@@ -578,7 +593,9 @@ tt_total <- total_test %>%
 
 tt_total
 ```
-### T-test: For subset of countries where 95% confidence that coverage changed
+
+### t-test: For subset of countries where 95% confidence that coverage changed
+
 ```{r}
 confident_countries <- cov_forecast_clean %>%
   filter(confident_95 == TRUE) 
@@ -622,6 +639,7 @@ tt_total_clean
 
 
 ### By region
+
 ```{r}
 ttest_region <- cov_forecast_clean %>%
   filter(!is.na(actuals_2020)) %>%
@@ -653,26 +671,27 @@ tt_reg
 ```
 
 #### Box plot for region
+
 ```{r}
 region <- ggplot(cov_forecast_clean, aes(x = un_region, y = cov_delta_mean, color = un_region)) +
-  geom_boxplot()+
+  geom_boxplot() +
   geom_point(size = 2, position = position_jitter(width = 0.2)) +
   stat_summary(fun = mean, geom = "point", shape = 4, size = 4,
-               color = c("lightcoral", "olivedrab", "seagreen4", "deepskyblue4", "magenta"))+
-  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2))+
+               color = c("lightcoral", "olivedrab", "seagreen4", "deepskyblue4", "magenta")) +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2)) +
   labs(title = "Region: Box plot of coverage delta by UNICEF region classification",
        x = "Region",
        y = "DTP1 Coverage delta",
-       colour = "Region")+
-  theme_light()+
+       colour = "Region") +
+  theme_light() +
   theme(plot.title = element_text(face = "bold", size = 20),
         legend.position = "none",
         axis.text = element_text(size = 14),
         axis.title.y = element_text(angle = 90),
         axis.title = element_text(size = 17)
-  )+
-  scale_x_discrete(labels = wrap_format(12))+
-  geom_hline(aes(yintercept = 0), colour = "blue")+
+  ) +
+  scale_x_discrete(labels = wrap_format(12)) +
+  geom_hline(aes(yintercept = 0), colour = "blue") +
   geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -2, hjust = -0.2), size = 5, colour = "blue")
 region
 
@@ -684,6 +703,7 @@ ggsave(filename = here::here("figures", "region_box_plot_dtp1.png"),
 
 
 ### By income group
+
 ```{r}
 ttest_income_group <- cov_forecast_clean %>%
   filter(!is.na(actuals_2020)) %>%
@@ -716,22 +736,22 @@ tt_inc_grp
 ```
 
 ```{r}
-income_box <- ggplot(cov_forecast_clean, aes(x = income_group, y = cov_delta_mean, color = income_group))+
+income_box <- ggplot(cov_forecast_clean, aes(x = income_group, y = cov_delta_mean, color = income_group)) +
   labs(title = "Income group: Box plot of coverage delta",
        x = "Income group",
        y = "DTP1 Coverage delta",
-       colour = "Income group")+
-  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2))+
-  geom_boxplot()+
+       colour = "Income group") +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2)) +
+  geom_boxplot() +
   geom_point(size = 2, position = position_jitter(width = 0.2)) +
-  stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = c("red", "green", "cyan", "purple"))+
-  theme_light()+
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = c("red", "green", "cyan", "purple")) +
+  theme_light() +
   theme(plot.title = element_text(face = "bold", size = 20),
         legend.position = "none",
         axis.text = element_text(size = 16),
         axis.title.y = element_text(angle = 90),
-        axis.title = element_text(size = 18))+
-  geom_hline(aes(yintercept = 0), colour = "blue")+
+        axis.title = element_text(size = 18)) +
+  geom_hline(aes(yintercept = 0), colour = "blue") +
   geom_text(aes(0, 0, label = "Expected = reported coverage", vjust = -1, hjust = 0), size = 5, colour = "blue")
 income_box
 
@@ -765,14 +785,14 @@ tt_gavi_grp <- tt_gavi %>%
                 sample_size = parameter,
                 low_bound = conf.low,
                 upper_bound = conf.high) %>%
-  mutate(sample_size = (sample_size+1)) %>% #since parameter is degrees of freedom not sample size
+  mutate(sample_size = (sample_size + 1)) %>% # since parameter is degrees of freedom not sample size
   left_join(gav, by = "gavi_status") %>%
   dplyr::select(gavi_status, sample_size, "mean(predicts_2020)", "mean(actuals_2020)",
                 point_estimate, low_bound, upper_bound, p_value)
 
 tt_gavi_grp
 
-##BINARY version
+# Binary version
 tt_gavi_bin <- cov_forecast_clean %>%
   filter(actuals_2020 >= 0) %>%
   group_by(gavi_binary) %>% 
@@ -786,7 +806,7 @@ gav_bin <- cov_forecast_clean %>%
   group_by(gavi_binary) %>%
   dplyr::summarize(mean(actuals_2020), mean(predicts_2020))
 
-#create more readable output 
+# create more readable output 
 tt_gavi_grp_bin <- tt_gavi_bin %>%
   dplyr::select(gavi_binary, estimate, p.value, parameter, conf.low, conf.high) %>%
   dplyr::rename(point_estimate = estimate,
@@ -803,7 +823,8 @@ tt_gavi_grp_bin
 
 ```
 
-#### Save T-test outputs
+#### Save t-test outputs
+
 ```{r}
 write.csv(
   tt_reg,
@@ -833,9 +854,13 @@ write.csv(
 
 
 ## Outputs including missed immunisation quantification
+
 - Import UNWPP data
-- Multiply coverage delta estimates by surviving infant populations to calculate additional missed immunisations
-- Create summary output table including % coverage delta and  missed immunisations 
+- Multiply coverage delta estimates by surviving infant populations to calculate
+  additional missed immunisations
+- Create summary output table including % coverage delta and missed
+  immunisations
+
 ```{r}
 file_path_unwpp <- here::here("data", "unwpp.csv")
 
@@ -901,8 +926,11 @@ write.csv(
 ```
 
 ### Summary modelling output for Appendix
+
 Produce table showing order and fit of all ARIMA models per country
+
 ```{r}
+
 order <- output %>%
   filter(plot_key == "Forecast") %>%
   dplyr::select(country, iso_code) %>%
@@ -918,7 +946,7 @@ order <- output %>%
          "Expected: 95% Confidence interval - lower bound" = lower,
          "Expected: 95% Confidence interval - upper bound" = upper)
 
-order <- apply(order,2,as.character)
+order <- apply(order, 2, as.character)
 
 write.csv(
   order,
