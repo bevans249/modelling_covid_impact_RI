@@ -134,7 +134,9 @@ x
 ## Data filtering
 
 ### Filter data for complete data
+
 We remove:
+
 - entries where coverage is NA
 - years prior to 2000
 - countries without data for the last 20 consecutive years
@@ -156,15 +158,20 @@ x
 ```
 
 ## Coverage modelling
-Model "expected' 2020 coverage based, in the absence of COVID, based on 2000-2019 trends. 
-ARIMA model uses timeseries data by country to: <br>
-(a) select the most appropriate model, defined by three parameters (p, d, q) selected as follows:
+
+Model "expected' 2020 coverage based, in the absence of COVID, based on
+2000-2019 trends.  ARIMA model uses timeseries data by country to (a) select the
+most appropriate model, defined by three parameters (p, d, q) selected as
+follows:
+
 - p = number of autoregressive terms - based on minimisation of the AIC
 - d = number of non-seasonal differences needed for stationarity - based on conducting KPSS tests
 - q = number of lagged forecast errors in the prediction equation - based on minimisation of the AIC <br>
-and (b) predict 2020 coverage based on this selected model
+
+and (b) predict 2020 coverage based on this selected model.
 
 ### Fit models
+
 ```{r}
 ts_df <- ts(reshape2::dcast(x, year ~ iso_code), start = 2000, freq = 1)
 ts_forecast <- lapply(ts_df, function(y) forecast(auto.arima(y, seasonal = FALSE), h = 1, level = 95))
@@ -176,7 +183,9 @@ model %<>%
   dplyr::select(iso_code, method, mean, lower, upper) 
 ```
 
-Since WUENIC coverage is capped at 99% (i.e., no country can ever report 100%) we replace any 2020 estimates >99% to 99% coverage
+Since WUENIC coverage is capped at 99% (i.e., no country can ever report 100%)
+we replace any 2020 estimates >99% to 99% coverage
+
 ```{r}
 model %<>%
   mutate(mean = ifelse(mean > 0.99, 0.99, mean))
@@ -184,7 +193,9 @@ model %<>%
 
 
 ### Consolidate outputs with expected 2020 dataset
+
 Combine forecast data with actuals to create full timeseries
+
 ```{r}
 x2 <- x %>%
   filter(year == '2000-12-31') %>%
@@ -209,14 +220,14 @@ output <- rbind(x, x2) %>%
          predicts_lower = as.numeric(low_bound),
          predicts_upper = as.numeric(upper_bound))
 
-#set-up data for t-test conducted later
+# set-up data for t-test conducted later
 ttest_2020 <- output %>%
   filter(year == "2020-12-31") %>%
   dplyr::select(-c(ARIMA_model, country)) %>%
   dplyr::rename(predicts_2020 = coverage) %>%
   inner_join(cov_2020, by = "iso_code")
 
-#create consolidated output dataset
+# create consolidated output dataset
 cov_forecast <- output %>%
   as_tibble() %>%
   filter(year == "2020-12-31") %>%
@@ -234,7 +245,7 @@ cov_forecast <- output %>%
                                FALSE, TRUE),
          ci_width = predicts_upper - predicts_lower)
 
-#Add in other groupings for analyses
+# Add in other groupings for analyses
 cov_forecast %<>%
   mutate(un_region = countrycode(iso_code, origin = "iso3c", destination = "un.region.name"),
          income_group = dplyr::recode_factor(income_group,
@@ -251,7 +262,9 @@ cov_forecast %<>%
 ## Plot and visualise outputs
 
 ### For single countries
-Plot single country output
+
+Plot single country output:
+
 ```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1}
 country_dat <- output %>%           
   filter(country == "Jordan") # Replace name by country of interest
@@ -276,12 +289,13 @@ country_vis
 ```
 
 ### For subset of countries - largest populations
+
 ```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1}
 large_pops <- c("China", "India", "Pakistan", "Nigeria")
 pop_dat <- output %>%
   filter(country %in% large_pops) %>%
   dplyr::select(country, iso_code, year, coverage, plot_key)
-#update for countries of interest
+# update for countries of interest
 
 pop_dat_2020 <- cov_2020 %>%
   filter(country %in% large_pops) %>%
@@ -330,7 +344,10 @@ ggsave(filename = here::here("figures", "forecast_pop_dtp1.png"),
 ```
 
 ### For all countries
-Output shown for 15 countries at a time - changeable by changing the paginate output
+
+Output shown for 15 countries at a time - changeable by changing the paginate
+output:
+
 ```{r, message = FALSE, warning = FALSE, results = "hide", fig.keep = 1}
 plot_dat_key <- cov_2020 %>%
   mutate(year = "2020-12-31") %>%
@@ -376,6 +393,7 @@ vis
 <br>
 
 ### Save output as file
+
 ```{r, message = FALSE, warnings = FALSE}
 ggsave(filename = here::here("figures", "forecast_dtp1.png"),
        plot = vis, 
@@ -385,14 +403,29 @@ ggsave(filename = here::here("figures", "forecast_dtp1.png"),
 ## Conduct T-tests for predicted vs. observed coverage
 
 ### Remove unreliable expected coverage estimates
-Countries were considered as potential unreliable datapoints based on:
-1)	Visual inspection of 2000-2019 WUENIC reported coverage showed high volatility, i.e., fluctuations over a 10-percentage point range in the last five to 10 years – since this indicates coverage estimates may be unreliable and uncertain
-2)	Visual inspection of forecast model fit showed fit dependent on major increases/ decreases in 2018-2019 coverage – since this indicates exceptional circumstances (e.g., stockouts, civil war) may have overly weighted forecast coverage
-3)	Calculating forecast percentage point improvement in coverage from reported 2019 to forecast 2020 coverage and reviewing countries with forecast +5 percentage point improvements – since such may not be programmatically realistic (despite model fitting)
 
-Then, WUENIC country-specific documentation was reviewed to confirm whether to remove countries
+Countries were considered as potential unreliable datapoints based on:
+
+1. Visual inspection of 2000-2019 WUENIC reported coverage showed high
+volatility, i.e., fluctuations over a 10-percentage point range in the last
+five to 10 years – since this indicates coverage estimates may be unreliable
+and uncertain
+   
+2. Visual inspection of forecast model fit showed fit dependent on major
+increases/ decreases in 2018-2019 coverage – since this indicates exceptional
+circumstances (e.g., stockouts, civil war) may have overly weighted forecast
+coverage
+
+3. Calculating forecast percentage point improvement in coverage from reported
+2019 to forecast 2020 coverage and reviewing countries with forecast +5
+percentage point improvements – since such may not be programmatically realistic
+(despite model fitting)
+
+Then, WUENIC country-specific documentation was reviewed to confirm whether to
+remove countries.
 
 For option (3):
+
 ```{r}
 dtp1_change <- output %>% 
   filter(year == "2019-12-31" | year == "2020-12-31") %>% 
@@ -406,7 +439,8 @@ dtp1_change
 ```
 
 
-Countries considered as potential unreliable estimated coverage estimates are: <br>
+Countries considered as potential unreliable estimated coverage estimates are:
+
 (1) Criteria one - <br>
 - *Solomon Islands*: high variance over time. WUENIC report that "increase in estimated coverage from 2018 [to 2019] is unlikely but exceptionally allowed given the small birth cohort size" - given such uncertainty and lack of confidence, removed
 - *Suriname*: recent trends volatile, and WUENIC report "recent survey results suggest lower levels of coverage than that reported by the programme during the past 10 years. Further investigation to understand underlying differences is warranted, and WHO and UNICEF recommend a high-quality independent empirical assessment to confirm reported levels of coverage" as well as stockouts in 2019 and 2017 (one month), syringe stockout in 2018 (four months)
