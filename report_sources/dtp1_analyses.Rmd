@@ -44,6 +44,7 @@ Import data:
   and Eligibility policy
 
 ```{r}
+
 file_path_dtp1 <- here::here("data", "dtp1_oct.csv")
 data_raw <- file_path_dtp1 %>%
   rio::import(header = TRUE) %>%
@@ -51,7 +52,7 @@ data_raw <- file_path_dtp1 %>%
 data_raw
 
 file_path_dtp1_old <- here::here("data", "dtp1.csv")
-data_old<- file_path_dtp1_old %>%
+data_old <- file_path_dtp1_old %>%
   rio::import(header = TRUE) %>%
   tibble()
 data_old
