@@ -1,0 +1,931 @@
+---
+title: "Analyses for COVID-19 impact on Routine Immunisation in 2021"
+author: "Beth Evans and Thibaut Jombart"
+date: "1 Dec 2021"
+output: 
+  html_document:
+    code_folding: "show"
+    toc: TRUE
+    toc_depth: 4
+    toc_float: TRUE
+    toc_collapse: FALSE
+    number_sections: TRUE
+    highlight: pygments
+    theme: spacelab
+params:
+  data: "dtp3"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      dev = c("png", "pdf"),
+                      fig.path = "figs/",
+                      dpi = 100)
+```
+
+# Set-up
+
+## Load packages
+
+```{r, message = FALSE}
+library(tidyverse)
+library(rio)
+library(magrittr)
+library(timetk)
+library(broom)
+library(scales)
+library(ggforce)
+library(urca)
+library(tseries)
+library(forecast)
+library(data.table)
+library(countrycode)
+library(here)
+library(flextable)
+library(webshot)
+library(wesanderson)
+library(cowplot)
+
+```
+
+## Load raw data
+
+Import data:
+
+- Coverage data from WUENIC for 2000-2021
+- Income group classification from World Bank
+- Birth and infant mortality data from United Nations World Population Prospects
+  (UN WPP)
+
+```{r}
+# Set-up toggle to pull DTP1, DTP3, and MCV1 data respectively when compiling for the appropriate antigen
+if (params$data == "dtp1") {
+  file_path <- here::here("data", "dtp1_2021.csv")
+} else if (params$data == "dtp3") {
+  file_path <- here::here("data", "dtp3_2021.csv")
+} else if (params$data == "mcv1") {
+  file_path <- here::here("data", "mcv1_2021.csv") 
+} else {
+  msg <- sprintf("Unknown dataset requested: %s", params$data)
+  stop(msg)
+}
+
+# Impact WUENIC data
+data_raw <- file_path %>%
+  rio::import(header = TRUE) %>%
+  tibble()
+data_raw
+
+# Import World Bank classification data
+file_path_wb <- here::here("data", "wb_ig_oghist.csv")
+income <- file_path_wb %>%
+  rio::import(header = TRUE, skip = 4) %>%
+  tibble()
+income <- income[-c(1:6), ]
+income
+
+
+```
+
+## Set-up output folders
+
+Outputs are stored in two separate folders (in addition to the compiled report,
+handled by the *reportfactory*), *outputs/figures/* and *outputs/csv/*. We make
+sure these exist.
+
+```{r}
+# Make sure output folder exists
+fig_folder <- here::here("figures", params$data)
+if (!dir.exists(fig_folder)) {
+  dir.create(fig_folder, recursive = TRUE)
+}
+
+# Make sure output folder exists
+csv_folder <- here::here("outputs", "csv", params$data)
+if (!dir.exists(csv_folder)) {
+  dir.create(csv_folder, recursive = TRUE)
+}
+
+```
+
+
+
+# Data preparation
+
+Here we prepare the dataset analysed called `x`.
+
+## Data cleaning
+
+Steps taken:
+
+- rename variables 
+- reshape data to long vs. wide format
+- add categorisation columns (income group, region)
+- select relevant columns only 
+
+```{r}
+
+# Clean and reshape 2000-2021 coverage data
+data_clean <- data_raw %>% 
+  rename(iso_code = iso3) %>%
+  mutate(region = countrycode(iso_code,
+                              origin = "iso3c",
+                              destination = "un.region.name")) %>%
+  select(region, unicef_region, everything())
+
+data_long <- data_clean %>%
+  pivot_longer(-(region:vaccine), names_to = "year", values_to = "coverage")
+names(data_long) <- tolower(names(data_long))
+data_long
+
+# Join 'income' classification to main dataset
+income %<>% 
+  dplyr::select(V1, FY23) %>%
+  rename(iso_code = V1, `income_group` = FY23) %>%
+  mutate(
+    income_group = recode_factor(income_group,
+                               "L" = "LIC",
+                               "LM" = "LMIC",
+                               "UM" = "UMIC",
+                               "H" = "HIC"))
+
+data_long %<>%
+  inner_join(income, by = "iso_code")
+data_long
+
+# Clean consolidated projection dataset
+x <- data_long %>%
+  mutate(coverage = coverage / 100,
+         year = as.integer(year)) %>%
+  select(region, country, iso_code, income_group, year, coverage) %>%
+  arrange(country, year)
+x
+
+```
+
+
+## Data filtering
+
+We remove:
+
+- years prior to 2000
+- entries where coverage is NA
+- countries without data for the last 21 consecutive years (from 2000 to 2020,
+  inclusive)
+
+```{r}
+
+# Filter for data from 2000 onwards (inclusive), remove NAs
+x <- x %>%
+  filter(year >= 2010, !is.na(coverage))
+
+# Filter for countries with complete data from 2000 to 2020, i.e. 21 data points
+complete_countries <- x %>%
+  count(iso_code) %>%
+  filter(n == 12) %>%
+  pull(iso_code)
+
+x %<>%
+  filter(iso_code %in% complete_countries)
+
+x_temp <- x %>%
+  filter(year == 2020 | year == 2021) %>%
+  arrange(iso_code)
+
+```
+
+
+# ARIMA modelling
+
+Here we apply ARIMA to each country using the years 2000-2019 as training set,
+and derive a forecast for 2020 with associated confidence intervals. The final
+object will be called `res`, and will include these forecasts, the actual values
+reported, and the corresponding coverage *deltas*, defined as (% reported - %
+expected).
+
+## Model parameters
+
+Model "expected' 2020 coverage based, in the absence of COVID, based on
+2000-2019 trends.  ARIMA model uses timeseries data by country to (a) select the
+most appropriate model, defined by three parameters (p, d, q) selected as
+follows:
+
+- p = number of autoregressive terms - based on minimisation of the AIC
+- d = number of non-seasonal differences needed for stationarity - based on conducting KPSS tests
+- q = number of lagged forecast errors in the prediction equation - based on minimisation of the AIC
+
+and (b) predict 2020 coverage based on this selected model.
+
+
+## Testing alpha levels
+
+### Forecast 2020 and 2021 coverage based on 2000-2019 trends
+
+Note that 2020 actuals may have been retrospectively updated compared to the 2020 WUENIC data release, which is why we are re-doing this rather than using outputs from previous modelling
+
+`auto.arima` requires time series (`ts`) objects, which is essentially a wide
+format for coverage data (rows = years, columns = countries).
+
+```{r}
+# Reshape data to timeseries format
+ts_df <- x %>%
+  arrange(iso_code) %>%
+  filter(year < 2020) %>% 
+  select(year, iso_code, coverage) %>%
+  pivot_wider(values_from = coverage, names_from = iso_code) %>%
+  arrange(year) %>%
+  select(-year) %>% 
+  ts(start = 2010, freq = 1)
+```
+
+Forecast based on different confidence intervals
+```{r}
+#Alpha = 95
+ts_forecasts_95 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 95 # 95% CIs
+                                 ))
+
+
+# extract forecasts and format output
+temp_95 <- lapply(ts_forecasts_95,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_95) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_95 <- bind_rows(temp_95) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 95`,
+         upper_ci = `Hi 95`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_95 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_95)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_95 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_95 <- forecasts_95 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_95 <- res_all_95 %>%
+  filter(year == 2020)
+
+sig_above_95 <- res_2020_95 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_95 <- res_2020_95 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_95 <- c(sig_above_95$n, sig_below_95$n)
+
+# Alpha = 90
+
+ts_forecasts_90 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 90 # 90% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_90 <- lapply(ts_forecasts_90,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_90) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_90 <- bind_rows(temp_90) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 90`,
+         upper_ci = `Hi 90`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_90 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_90)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_90 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_90 <- forecasts_90 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_90 <- res_all_90 %>%
+  filter(year == 2020)
+
+sig_above_90 <- res_2020_90 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_90 <- res_2020_90 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_90 <- c(sig_above_90$n, sig_below_90$n)
+
+# Alpha = 99
+
+ts_forecasts_99 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 99 # 99% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_99 <- lapply(ts_forecasts_99,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_99) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_99 <- bind_rows(temp_99) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 99`,
+         upper_ci = `Hi 99`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_99 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_99)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_99 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_99 <- forecasts_99 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_99 <- res_all_99 %>%
+  filter(year == 2020)
+
+sig_above_99 <- res_2020_99 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_99 <- res_2020_99 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_99 <- c(sig_above_99$n, sig_below_99$n)
+
+# Alpha = 80
+ts_forecasts_80 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 80 # 80% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_80 <- lapply(ts_forecasts_80,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_80) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_80 <- bind_rows(temp_80) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 80`,
+         upper_ci = `Hi 80`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_80 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_80)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_80 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_80 <- forecasts_80 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_80 <- res_all_80 %>%
+  filter(year == 2020)
+
+sig_above_80 <- res_2020_80 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_80 <- res_2020_80 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_80 <- c(sig_above_80$n, sig_below_80$n)
+
+# Alpha = 70
+# Alpha = 90
+
+ts_forecasts_70 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 70 # 70% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_70 <- lapply(ts_forecasts_70,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_70) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_70 <- bind_rows(temp_70) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 70`,
+         upper_ci = `Hi 70`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_70 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_70)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_70 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_70 <- forecasts_70 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_70 <- res_all_70 %>%
+  filter(year == 2020)
+
+sig_above_70 <- res_2020_70 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_70 <- res_2020_70 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_70 <- c(sig_above_70$n, sig_below_70$n)
+
+# Alpha = 60
+
+ts_forecasts_60 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 60 # 60% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_60 <- lapply(ts_forecasts_60,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_60) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_60 <- bind_rows(temp_60) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 60`,
+         upper_ci = `Hi 60`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_60 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_60)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_60 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_60 <- forecasts_60 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_60 <- res_all_60 %>%
+  filter(year == 2020)
+
+sig_above_60 <- res_2020_60 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_60 <- res_2020_60 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_60 <- c(sig_above_60$n, sig_below_60$n)
+
+# Alpha = 50
+
+ts_forecasts_50 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 50 # 50% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_50 <- lapply(ts_forecasts_50,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_50) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_50 <- bind_rows(temp_50) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 50`,
+         upper_ci = `Hi 50`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_50 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_50)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_50 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_50 <- forecasts_50 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_50 <- res_all_50 %>%
+  filter(year == 2020)
+
+sig_above_50 <- res_2020_50 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_50 <- res_2020_50 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_50 <- c(sig_above_50$n, sig_below_50$n)
+
+# Alpha = 40
+
+ts_forecasts_40 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 40 # 40% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_40 <- lapply(ts_forecasts_40,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_40) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_40 <- bind_rows(temp_40) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 40`,
+         upper_ci = `Hi 40`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_40 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_40)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_40 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_40 <- forecasts_40 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_40 <- res_all_40 %>%
+  filter(year == 2020)
+
+sig_above_40 <- res_2020_40 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_40 <- res_2020_40 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_40 <- c(sig_above_40$n, sig_below_40$n)
+
+# Alpha = 30
+
+ts_forecasts_30 <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 2, # forecast 1 and 2 years ahead
+                                 level = 30 # 30% CIs
+                                 ))
+
+# extract forecasts and format output
+temp_30 <- lapply(ts_forecasts_30,
+               function(e) c(method = e$method, as.data.frame(e)))
+
+# need to extract second prediction interval - this is ugly solution
+temp_names <- names(temp_30) 
+double_names <- temp_names %>%
+  append(temp_names) %>%
+  sort()
+
+forecasts_30 <- bind_rows(temp_30) %>%
+  mutate(iso_code = double_names,
+         mean = `Point Forecast`,
+         lower_ci = `Lo 30`,
+         upper_ci = `Hi 30`) %>%
+  tibble() %>%
+  select(iso_code, method, mean, lower_ci, upper_ci)
+
+forecasts_30 %<>%
+  mutate(row_num = seq.int(nrow(forecasts_30)),
+         year = case_when(((row_num %% 2) == 0) ~"2021", 
+                          ((row_num %% 2) == 1)  ~"2020"),
+         year = as.integer(year)) %>%
+  select(-row_num)
+
+#Cap at 99% coverage maximum, as per WUENIC rules
+forecasts_30 %<>% 
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),) %>%
+  arrange(iso_code)
+
+#set-up results table
+res_all_30 <- forecasts_30 %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+
+#Count significant results
+res_2020_30 <- res_all_30 %>%
+  filter(year == 2020)
+
+sig_above_30 <- res_2020_30 %>%
+  filter(within_ci == FALSE & coverage > mean) %>%
+  count()
+
+sig_below_30 <- res_2020_30 %>%
+  filter(within_ci == FALSE & coverage < mean) %>%
+  count()
+
+sig_values_30 <- c(sig_above_30$n, sig_below_30$n)
+```
+
+Combine results together in dataframe
+```{r}
+alpha_values <- c(0.7,0.6,0.50,0.40,0.30,0.20,0.10,0.05,0.01) 
+above_values <- c(sig_above_30$n, sig_above_40$n, sig_above_50$n, sig_above_60$n, sig_above_70$n,
+                  sig_above_80$n, sig_above_90$n, sig_above_95$n, sig_above_99$n)
+below_values <- c(sig_below_30$n, sig_below_40$n, sig_below_50$n, sig_below_60$n, sig_below_70$n,
+                  sig_below_80$n, sig_below_90$n, sig_below_95$n, sig_below_99$n)
+
+alpha_counts <- data.frame(alpha_values, above_values, below_values)
+alpha_counts %<>%
+  mutate(sig_dif = below_values - above_values,
+         prop_dif = (below_values + above_values)/190,
+         prop_alpha = prop_dif/alpha_threshold,
+         dif_alpha = abs(prop_dif - alpha_values))
+alpha_counts
+
+
+
+volcano1 <- alpha_counts %>%
+  ggplot(aes(x = alpha_values, y = sig_dif))+
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  labs(title = "Volcano plot 1",
+       x = "Alpha value (#)",
+       y = "Count of countries with significant decline - \ncountries with significant increase") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10), 
+        strip.text.x = element_text(size = 10), 
+        axis.title = element_text(size = 11))
+volcano1
+
+volcano2 <- alpha_counts %>%
+  ggplot(aes(x = alpha_values, y = prop_dif))+
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  labs(title = "Volcano plot 2",
+       x = "Alpha value (#)",
+       y = "Proportion of countries with significant results") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10), 
+        strip.text.x = element_text(size = 10), 
+        axis.title = element_text(size = 11))+
+  geom_abline(slope = 1, intercept = 0)
+volcano2
+
+plot1 <- alpha_counts %>%
+  ggplot(aes(x = factor(alpha_values), y = dif_alpha))+
+  theme_bw() +
+  geom_col() +
+  labs(title = "PLot",
+       x = "Alpha value (#)",
+       y = "Difference between alpha value and significant proportion") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10), 
+        strip.text.x = element_text(size = 10), 
+        axis.title = element_text(size = 11))
+plot1
+
+```
+## Visualise the confidence intervals
+```{r fig_large_pops, out.width = "100%", fig.width = 10, fig.height = 3}
+
+# Select countries for inclusion in plot
+large_pops <- c("India", "China", "Pakistan", "Indonesia", "Nigeria")
+
+x_large <- x %>%
+  filter(country %in% large_pops)
+
+res_large <- res_all_95 %>%   # Change this to show the different confidence intervals
+  filter(country %in% large_pops)
+
+# Generate plot
+arima_color <- "#ac3973"
+
+fig_large_pops <- ggplot(data = x_large, aes(x = year, y = coverage)) +
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  geom_errorbar(data = res_large, aes(x = year, ymin = lower_ci, ymax = upper_ci),
+                color = arima_color) +
+  geom_point(data = res_large, aes(y = mean), shape = 3, color = arima_color) +
+  facet_wrap(~ country, nrow = 1, scales = "free_y",
+             labeller = label_wrap_gen(25)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
+                     limits = c(NA,1),
+                     n.breaks = 5) +
+  labs(y = "Coverage (%)",
+       x = "Year") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14), 
+        strip.text.x = element_text(size = 14), 
+        axis.title = element_text(size = 18))
+ 
+fig_large_pops
+
+# Save file 
+ggsave(filename = here::here(fig_folder, "forecast_large_pops_cis.png"),
+       plot = fig_large_pops, 
+       width = 30, height = 10, units = "cm")
+
+```

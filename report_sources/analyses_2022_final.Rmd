@@ -1,0 +1,1533 @@
+---
+title: "Time series analysis of routine immunisation coverage shows continued global decline throughout the COVID-19 pandemic but tentative recovery in 2022"
+author: "Beth Evans and Thibaut Jombart"
+date: "23 August 2023"
+output: 
+  html_document:
+    code_folding: "show"
+    toc: TRUE
+    toc_depth: 4
+    toc_float: TRUE
+    toc_collapse: FALSE
+    number_sections: TRUE
+    highlight: pygments
+    theme: spacelab
+params:
+  data: "dtp3"    # Defines which vaccine to run (DTP1, DTP3, or MCV1)
+  test_year: "2022"   # Defines which year to run (2020-2022) 
+  sensitivity_toggle: "off" # Determines whether analysis run on all countries ("on") or included countries ("off"). As default, and to recreate manuscript and appendix results use "off"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      dev = c("png", "pdf"),
+                      fig.path = "figs/",
+                      dpi = 100)
+```
+
+# Set-up
+
+## Load packages
+
+```{r, message = FALSE}
+library(epiDisplay)
+library(tidyverse)
+library(rio)
+library(magrittr)
+library(timetk)
+library(broom)
+library(scales)
+library(ggforce)
+library(urca)
+library(tseries)
+library(forecast)
+library(data.table)
+library(countrycode)
+library(here)
+library(flextable)
+library(webshot)
+library(wesanderson)
+library(cowplot)
+library(formattable)
+select <- dplyr::select
+```
+
+## Load raw data
+
+Import data:
+
+- Coverage data from WUENIC for 2000-2022
+- Income group classification from World Bank
+- Key demographic data from United Nations World Population Prospects (UN WPP)
+
+```{r}
+# Set-up toggle to pull DTP1, DTP3, and MCV1 data respectively when compiling for the appropriate antigen
+if (params$data == "dtp1") {
+  file_path <- here::here("data", "dtp1_2022_vF.csv")
+} else if (params$data == "dtp3") {
+  file_path <- here::here("data", "dtp3_2022_vF.csv")
+} else if (params$data == "mcv1") {
+  file_path <- here::here("data", "mcv1_2022_vF.csv") 
+} else {
+  msg <- sprintf("Unknown dataset requested: %s", params$data)
+  stop(msg)
+}
+
+# Impact WUENIC data
+data_raw <- file_path %>%
+  rio::import(header = TRUE) %>%
+  tibble()
+data_raw
+
+# Import World Bank classification data
+file_path_wb <- here::here("data", "wb_ig_oghist_2022.csv")
+income <- file_path_wb %>%
+  rio::import(header = TRUE, skip = 4) %>%
+  tibble()
+income <- income[-c(1:6), ]
+income
+
+# Import UN WPP data - two files are needed, one for historic values (up to 2021), and one for projections (2022)
+file_path_unwpp_raw <- here::here("data", "WPP2022_INT_F01_ANNUAL_DEMOGRAPHIC_INDICATORS.csv")
+
+unwpp_raw <- file_path_unwpp_raw %>%
+  rio::import(header = TRUE, skip = 16) %>%
+  tibble()
+
+unwpp_raw
+
+file_path_unwpp_proj_raw <- here::here("data", "WPP2022_GEN_F01_DEMOGRAPHIC_INDICATORS_projections.csv")
+
+unwpp_raw_proj <- file_path_unwpp_proj_raw %>%
+  rio::import(header = TRUE, skip = 16) %>%
+  tibble()
+
+unwpp_raw_proj
+
+```
+
+## Set-up output folders
+
+Outputs are stored in two separate folders (in addition to the compiled report,
+handled by the *reportfactory*), *figures/* and *csv/*. We make
+sure these exist.
+
+```{r}
+# Make sure output folder exists
+fig_folder <- here::here("figures", params$data)
+if (!dir.exists(fig_folder)) {
+  dir.create(fig_folder, recursive = TRUE)
+}
+
+# Make sure output folder exists
+csv_folder <- here::here("csv", params$data)
+if (!dir.exists(csv_folder)) {
+  dir.create(csv_folder, recursive = TRUE)
+}
+
+```
+
+
+# Data preparation
+
+Here we prepare the dataset analysed called `x`.
+
+## Data cleaning
+
+### Coverage data
+
+Steps taken for coverage data:
+
+- rename variables 
+- reshape data to long vs. wide format
+- add categorisation columns (income group, region)
+- select relevant columns only 
+
+```{r}
+# Clean and reshape 2000-2022 coverage data
+data_clean <- data_raw %>% 
+  rename(iso_code = iso3) %>%
+  mutate(region = countrycode(iso_code,
+                              origin = "iso3c",
+                              destination = "un.region.name")) %>%
+  select(region, unicef_region, everything())
+
+data_long <- data_clean %>%
+  pivot_longer(-(region:vaccine), names_to = "year", values_to = "coverage")
+
+names(data_long) <- tolower(names(data_long))
+    
+data_long %<>% 
+  mutate(coverage = coverage / 100,
+         year = as.integer(year))
+data_long
+```
+
+### Income classification
+
+Steps taken for income data:
+
+- Extract income group as of 'Financial Year 2023' which refers to 2022
+  classification
+- Note that we used a fixed income group, i.e., not factoring in changes in
+  2020-2022.
+
+```{r}
+# Extract relvant data from income dataset
+income %<>% 
+  select(V1, FY24) %>%
+  rename(iso_code = V1, `income_group` = FY24) %>%
+  mutate(
+    income_group = recode_factor(income_group,
+                               "L" = "LIC",
+                               "LM" = "LMIC",
+                               "UM" = "UMIC",
+                               "H" = "HIC"))
+
+# Join 'income' classification to main dataset
+data_long %<>%
+  inner_join(income, by = "iso_code")
+data_long
+
+```
+### Combined coverage and country classification dataset
+
+Here we:
+- reorder the variables we are interested in
+- remove years prior to 2000
+- remove entries where coverage is NA
+- remove countries without data for the last 23 consecutive years (from 2000 to
+  2022, inclusive)
+
+```{r}
+# Reorder dataset
+x <- data_long %>%
+  select(region, country, iso_code, income_group, year, coverage) %>%
+  arrange(country, year)
+x
+
+# Filter for data from 2000 onwards (inclusive), remove NAs
+x <- x %>%
+  filter(year >= 2000, !is.na(coverage))
+
+# Filter for countries with complete data from 2000 to 2022, i.e. 23 data points
+complete_countries <- x %>%
+  count(iso_code) %>%
+  filter(n == 23) %>%
+  pull(iso_code)
+
+x %<>%
+  filter(iso_code %in% complete_countries)
+
+```
+
+
+### Population data
+Steps taken for population data:
+
+- Select relevant columns country and surviving infant estimate for each year,
+  from 2000 to 2022
+- Combine two UNWPP datasets
+- Convert surviving infants estimates to numbers, and multiply them by 1000,
+   since recorded in thousands in original dataset
+
+```{r}
+# Clean population data for up-to 2021
+unwpp_to_2021 <- unwpp_raw %>% 
+  rename(country = "Region, subregion, country or area *",
+         iso_code = "ISO3 Alpha-code",
+         surviving_infants = "Live Births Surviving to Age 1 (thousands)",
+         year = "Year") %>%
+  mutate(year = as.numeric(year)) %>%
+  filter(Type == "Country/Area",
+         year >= 2000,
+         year <= 2021) %>%
+  select(country, iso_code, year, surviving_infants) %>%
+  mutate(surviving_infants = as.numeric(gsub(",", "", surviving_infants)) * 1000)
+
+# Clean population data for 2022 (projection, since latest UNWPP data release in 2022)
+unwpp_2022 <- unwpp_raw_proj %>% 
+  rename(country = "Region, subregion, country or area *",
+         iso_code = "ISO3 Alpha-code",
+         surviving_infants = "Live births Surviving to Age 1 (thousands)",
+         year = "Year") %>%
+  filter(Type == "Country/Area",
+         year == 2022) %>%
+  select(country, iso_code, year, surviving_infants) %>%
+  mutate(surviving_infants = as.numeric(gsub(",", "", surviving_infants)) * 1000) 
+
+# Combine two datasets for surviving infant populations for 2000-2022
+unwpp <- unwpp_to_2021 %>%
+  rbind(unwpp_2022) %>%
+  arrange(country, year)
+unwpp
+
+```
+
+
+# ARIMA modelling
+
+Here we apply ARIMA to each country using the years 2000-2019 as training set,
+and derive a forecast for 2020 and 2021 with associated confidence intervals. The final
+object will be called `res`, and will include these forecasts, the actual values
+reported, and the corresponding coverage *deltas*, defined as (% reported - %
+expected).
+
+## Model parameters
+
+Model "expected' 2020, 2021, and 2022 coverage based, in the absence of COVID, based on
+2000-2019 trends.  ARIMA model uses timeseries data by country to (a) select the
+most appropriate model, defined by three parameters (p, d, q) selected as
+follows:
+
+- p = number of autoregressive terms - based on minimisation of the AIC
+- d = number of non-seasonal differences needed for stationarity - based on conducting KPSS tests
+- q = number of lagged forecast errors in the prediction equation - based on minimisation of the AIC
+
+and (b) predict 2020, 2021, and 2022 coverage based on this selected model.
+
+## Fitting models: Forecast 2020-2022 coverage based on 2000-2019 trends
+
+Note that in each WUENIC release, there may be 'retrospective' updates to coverage estimated and published in prior year datasets. For this reason we re-do analysis from previously published papers (Evans & Jombart, 2022) rather than using outputs from previous modelling
+
+`auto.arima` requires time series (`ts`) objects, which is essentially a wide
+format for coverage data (rows = years, columns = countries).
+
+```{r}
+# Reshape data to timeseries format
+ts_df <- x %>%
+  arrange(iso_code) %>%
+  filter(year < 2020) %>% 
+  select(year, iso_code, coverage) %>%
+  pivot_wider(values_from = coverage, names_from = iso_code) %>%
+  arrange(year) %>%
+  select(-year) %>% 
+  ts(start = 2000, freq = 1)
+
+#Forecast for 2020, 2021 and 2022 based on 2000-2019 inclusive
+ts_forecasts <- lapply(ts_df, # iterate over all countries
+                      function(y)
+                        forecast(auto.arima(y, seasonal = FALSE),
+                                 h = 3,     # forecast 1, 2 and 3 years ahead
+                                 level = 95 # 95% CIs
+                                 ))
+
+# extract forecasts and format output
+forecasts <- lapply(ts_forecasts,
+               function(e) c(method = e$method, as.data.frame(e))) %>%
+  lapply(function(e) tibble(data.frame(e),year = c(2020,2021,2022))) %>% 
+  bind_rows(.id = "iso_code") %>%
+  mutate(mean = `Point.Forecast`,
+         lower_ci = `Lo.95`,
+         upper_ci = `Hi.95`) %>%
+  tibble() %>%
+  select(iso_code, method, year, mean, lower_ci, upper_ci) %>%
+  mutate(mean = if_else(mean > 0.99, 0.99, mean),          # Cap at 99% coverage as per WUENIC rules
+         lower_ci = if_else(lower_ci < 0, 0, lower_ci),
+         upper_ci = if_else(upper_ci > 0.99, 0.99, upper_ci),)
+forecasts
+
+```
+
+## Create combined dataset for pandemic years (2020-2022)
+Here we:
+- combine the reported WUENIC data for 2020-2022 with the ARIMA forecast coverage for 2020-2022
+- calculate a variable called 'delta' which is the difference between reported and expected coverage (and the associated confidence intervals)
+
+'res_all' is the dataset for all countries for 2020-2022 actual and estimated coverage
+```{r}
+x_temp <- x %>%
+  filter(year == 2020 | year == 2021 | year == 2022) %>%
+  arrange(iso_code)
+
+res_all <- forecasts %>%
+  left_join(x_temp, by = c("iso_code", "year")) %>%
+  mutate(delta = coverage - mean,
+         lower_delta = coverage - lower_ci,
+         upper_delta = coverage - upper_ci,
+         within_ci = (coverage >= lower_ci) & (coverage <= upper_ci),
+         ci_width = upper_ci - lower_ci
+         )
+```
+
+# Data pre-screening before analyses
+
+## Prior knowledge removal of countries
+We remove *a priori* countries where:
+- WUENIC estimates have been "flat lined" at a constant level for years, due to lack of sufficient quality data being provided to WUENIC from countries.
+- Major geopolitical events have knowingly impacted Routine Immunisation programmes, independent of COVID-19 
+
+```{r fig.width = 10, fig.height = 10, out.width = "100%"}
+
+# Countries with WUENIC flat-lining over the full pandemic period:
+WUENIC_countries <- c("Central African Republic", "Haiti", "Guinea", "Lesotho", "Somalia")     
+                          #It is noted that this list has shorted since prior publications due to 
+                                                #retrospective updates to coverage estimates
+
+# Countries with major (non-COVID) changes in coverage that could bias results
+bias_countries <- c("Myanmar", "Ukraine", "Democratic People's Republic of Korea")
+
+removed_countries_a_priori <- c(WUENIC_countries, bias_countries) %>%
+  as_tibble() %>%
+  rename(country = value) %>%
+  mutate(iso_code = countrycode(sourcevar = country, origin = "country.name", destination = "iso3c"))
+
+```
+
+## Plot removed countries
+Creates figure for Appendix
+
+```{r}
+# Plot figure of a priori removed countries
+arima_color <- "#ac3973"  # Define color for model
+
+x_remove <- x %>%
+  filter(iso_code %in% removed_countries_a_priori$iso_code)
+
+res_remove <- res_all %>%
+  filter(iso_code %in% removed_countries_a_priori$iso_code)
+
+# Plot flatlined countries
+
+x_flat <- x %>%
+  filter(country %in% WUENIC_countries)
+
+res_flat <- res_all %>%
+  filter(country %in% WUENIC_countries)
+
+fig_flat <- x_flat %>%
+  ggplot(aes(x = year, y = coverage)) +
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  geom_errorbar(data = res_flat,
+                aes(ymin = lower_ci, ymax = upper_ci),
+                color = arima_color) +
+  geom_point(data = res_flat,
+             aes(y = mean), shape = 3, color = arima_color) +
+  facet_wrap(~ country, scales = "free_y",
+             labeller = label_wrap_gen(25),
+             nrow = 2,
+             ncol = 3) +   
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
+                     limits = c(NA,1),
+                     n.breaks = 5) +
+  labs(y = "Coverage (%)",
+       x = "Year") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14), 
+        strip.text.x = element_text(size = 14), 
+        axis.title = element_text(size = 18))
+fig_flat
+
+# Plot other removed countries
+x_bias <- x %>%
+  filter(country %in% bias_countries)
+
+res_bias <- res_all %>%
+  filter(country %in% bias_countries)
+
+fig_bias <- x_bias %>%
+  ggplot(aes(x = year, y = coverage)) +
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  geom_errorbar(data = res_bias,
+                aes(ymin = lower_ci, ymax = upper_ci),
+                color = arima_color) +
+  geom_point(data = res_bias,
+             aes(y = mean), shape = 3, color = arima_color) +
+  facet_wrap(~ country, scales = "free_y",
+             labeller = label_wrap_gen(25),
+             nrow = 1,
+             ncol = 3) +   
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
+                     limits = c(NA,1),
+                     n.breaks = 5) +
+  labs(y = "Coverage (%)",
+       x = "Year") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14), 
+        strip.text.x = element_text(size = 14), 
+        axis.title = element_text(size = 18))
+fig_bias
+
+# Combine figures
+removed_fig <- plot_grid(fig_flat, fig_bias, ncol = 1, nrow = 2,
+                         rel_heights = c(1.7, 1),
+                         rel_widths = c(3,2),
+                         labels = c("A", "B"))
+removed_fig
+ 
+
+# Save file
+ggsave(filename = here::here(fig_folder, paste("appendix_S4_forecast_a_priori_removed_",params$data,".png", sep = "")),
+       plot = removed_fig, 
+       width = 30, height = 30, units = "cm")
+```
+
+## Remove countries identified as unreliable datapoints
+Removes country from core dataset used for all analyses
+```{r}
+
+# Removed countries based on other routes described above
+removed_countries <- removed_countries_a_priori$iso_code
+
+# Remove countries from dataset of combined forecasts and results
+res <- res_all %>%
+  dplyr::filter(!iso_code %in% removed_countries)
+
+# Keep track of removed countries
+res_removed_countries <- res_all %>%
+  dplyr::filter(iso_code %in% removed_countries)
+x_removed_countries <- x %>%
+  dplyr::filter(iso_code %in% removed_countries)
+
+```
+
+# Data cleaning before analyses
+Set-up of additional structured datasets to allow for easier summary and analysis
+
+## Create dataset that includes 2019 actuals and 2020-2022 expected and actuals for summary analyses
+```{r}
+forecast_data <- res %>%
+  select(iso_code, year, forecast_coverage = mean)
+
+cov_2019 <- x %>%
+  filter(iso_code %in% forecast_data$iso_code,
+         year == 2019) %>%
+  select(iso_code, coverage_2019 = coverage)
+
+combo_data <- x %>%
+  filter(iso_code %in% forecast_data$iso_code) %>% 
+  left_join(forecast_data, by = c("year", "iso_code")) %>%
+  left_join(cov_2019, by = "iso_code") %>%
+  mutate(gap_2019_to_forecast = ifelse(!is.na(forecast_coverage), forecast_coverage - coverage_2019, "")) %>%
+  select(-c(coverage_2019))
+  
+```
+
+
+## Set-up output figure set-ups for analyses
+```{r}
+# Colour scheme for regions
+n_regions <- res %>%
+  pull(region) %>%
+  unique() %>%
+  length()
+region_pal <- wes_palette("Darjeeling1", n_regions, type = "discrete")
+
+# Colour scheme for income groups
+n_income <- res %>%
+  filter(income_group != "") %>%
+  pull(income_group) %>%
+  unique() %>%
+  length()
+income_pal <- wes_palette("BottleRocket2", n_income, type = "discrete")
+```
+
+
+### Set-up inputs for analyses that can be conducted on each year
+```{r}
+# Enter which year to test (2020, 2021, or 2022)
+test_year <- params$test_year
+
+# Create variable for printing what is being tested
+if (params$sensitivity_toggle == "on") {
+  sens_text <- "sensitivity_analysis"
+} else {
+  sens_text <- "core_analysis"
+}
+
+# Filter data
+if (params$sensitivity_toggle == "on") {
+  data_test <- res_all
+} else {
+  data_test <- res
+}
+
+data_test %<>%
+  filter(year == test_year)
+
+print(paste("Showing results for: ",test_year,sens_text))
+```
+
+# Analyses
+
+## METHODS EXAMPLE: Visualise coverage timeseries for subset of countries
+This produces Figure 1 in the paper to provide exemplars of the forecasting outputs for the 5 largest countries with available data. 
+A cowplot is then used to combine the outputs from each vaccine dose to produce the publication figure.
+
+```{r, out.width = "100%", fig.width = 10, fig.height = 3}
+# Indentify largest countries in dataset
+unwpp_ordered <- unwpp_2022 %>%
+  arrange(-surviving_infants) %>%
+  filter(iso_code %in% res$iso_code) %>% #filter to only those countries in final dataset
+  select(iso_code, surviving_infants) %>%
+  head(5)
+unwpp_ordered
+
+# Select countries for inclusion in plot
+large_pops <- unwpp_ordered$iso_code
+
+x_large <- x %>%
+  filter(iso_code %in% large_pops)
+
+res_large <- res %>%
+  filter(iso_code %in% large_pops)
+
+# Generate plot
+arima_color <- "#ac3973"
+
+fig_large_pops <- ggplot(data = x_large, aes(x = year, y = coverage)) +
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  geom_errorbar(data = res_large, aes(x = year, ymin = lower_ci, ymax = upper_ci),
+                color = arima_color) +
+  geom_point(data = res_large, aes(y = mean), shape = 3, color = arima_color) +
+  facet_wrap(~ country, nrow = 1, scales = "free_y",
+             labeller = label_wrap_gen(25)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
+                     limits = c(NA,1),
+                     n.breaks = 5) +
+  labs(y = "Coverage (%)",
+       x = "Year") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14), 
+        strip.text.x = element_text(size = 14), 
+        axis.title = element_text(size = 18))
+ 
+fig_large_pops
+
+# Save file 
+ggsave(filename = here::here(fig_folder, "1fig_paper_partial_forecast_large_pops.png"),
+       plot = fig_large_pops, 
+       width = 30, height = 10, units = "cm")
+
+```
+
+## ANALYSIS PART 1: Global trends
+
+### Trends in reported global coverage
+We produce a figure to show the trend in global average coverage per vaccine [further code required to combine figures for dtp1, dtp3, and mcv1 to create Figure 1 in the paper - this code below produces the output for one vaccine]
+
+```{r}
+# Calculate global average coverage for included countries per year from
+# 2000-2022
+reported <- x %>%
+  filter(iso_code %in% res$iso_code) %>%
+  pivot_wider(values_from = 'coverage', names_from = 'year') %>%
+  summarise_if(is.numeric, mean, na.rm = TRUE) %>%
+  pivot_longer(cols = everything(), names_to = "year", values_to = "coverage") %>%
+  mutate(year = as.numeric(year))
+
+# Calculate global average coverage estimates from ARIMA modelling for 2020-2022
+# Note that we include the reported 2019 result in the dataset to ease plotting
+extract2019 <- reported %>%
+  filter(year == 2019)
+
+modelled <- forecasts %>%
+  filter(iso_code %in% res$iso_code) %>%
+  group_by(year) %>%
+  summarise(coverage = mean(mean)) %>%
+  rbind(extract2019) %>%
+  mutate(year = as.integer(year)) %>%
+  arrange(year)
+
+# Plot global average coverage for 2000-2022
+modelled$type <- "modelled"
+reported$type <- "reported"
+global_cov_data <- bind_rows(modelled, reported) %>%
+  mutate(type = factor(type, levels = c("modelled", "reported")))
+
+global_cov <- ggplot(data = global_cov_data, aes(x = year, y = coverage)) +
+  geom_point(aes(colour = type), size = 2) +
+  geom_line(aes(colour = type), linewidth = 1, alpha = 0.5) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L),
+                     limits = c(0.7, 1),
+                     n.breaks = 5) +
+  scale_color_manual("", values = c(reported = "#5884C3", modelled = "darkblue"), 
+                     labels = c(paste("Modelled",toupper(params$data)), paste("Reported",toupper(params$data)))) +
+  labs(y = "Coverage (%)",
+       x = "Year") +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    strip.text.x = element_text(size = 14),
+    axis.title = element_text(size = 18, face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.position = c(0.1, 0.9),
+    legend.background = element_rect(colour = NA, fill = NA)
+  )
+  
+global_cov
+
+# Save file
+ggsave(filename = here::here(fig_folder, paste("2fig_paper_partial_global_cov_trends_",params$data,".png", sep = "")),
+       plot = global_cov, 
+       width = 15, height = 10, units = "cm")
+
+write.csv(
+  global_cov_data,
+  here::here(csv_folder, paste("global_cov_data_",params$data,"_",sens_text,".csv", sep = "")),
+  row.names = FALSE)
+
+```
+
+### Calculate how many years coverage has regressed for each pandemic year
+Here we global average reported coverage to previous reported years coverage to quantify impact by years of regression
+```{r}
+# Subset reported data into two parts: pre and during pandemic
+pre_pandemic <- reported %>%
+  filter(year < 2020)
+
+during_pandemic <- reported %>%
+  filter(year > 2019)
+
+# Find the year 
+closest_years <- sapply(during_pandemic$coverage, function(test_coverage) {
+  pre_pandemic$year[which.min(abs(pre_pandemic$coverage - test_coverage))]
+})
+
+# Create a table of results
+regression <- data.frame(
+  year = during_pandemic$year,
+  reported_coverage = during_pandemic$coverage,
+  closest_pre_pandemic_year = closest_years
+)
+regression
+
+write.csv(
+  regression,
+  here::here(csv_folder, paste("narrative_regression_",params$data,"_",sens_text,".csv", sep = "")),
+  row.names = FALSE)
+```
+
+
+### Investigate and quantify differences in coverage between expected and reported results for all countries combined
+
+```{r}
+# Conduct t-test
+ttest_total <- t.test(data_test$delta,
+                      alternative = "two.sided")
+ttest_total
+
+# Create readable output of t-test results
+stats_total <- data_test %>%
+  summarise(reported = mean(coverage, na.rm = TRUE),
+            expected = mean(mean, na.rm = TRUE))
+
+tt_total <- tibble(stats_total, broom::tidy(ttest_total))
+tt_total
+
+# Format output for paper
+tt_total_paper <- tt_total %>%
+  mutate(reported = round(reported, digits = 3) * 100,
+         Reported = paste(reported,"%", sep = ""),
+         expected = round(expected, digits = 3) * 100,
+         Expected = paste(expected,"%", sep = ""),
+         delta = round(estimate, digits = 3) * 100,
+         lower_ci = round(conf.high, digits = 3) * 100,
+         upper_ci = round(conf.low, digits = 3) * 100,
+         sample_size = parameter + 1,
+         Delta = paste(delta,"% [",lower_ci,"%; ",upper_ci,"%]",sep = ""),
+         Year = test_year,
+         `p-value` = ifelse(p.value < 0.0001, "< 0.0001", signif(p.value, digits = 2))) %>%
+  select(Year, Expected, Reported, Delta, `p-value`)
+tt_total_paper
+
+write.csv(
+  tt_total_paper,
+  here::here(csv_folder, paste("1table_paper_ttest_total_",params$data,"_",test_year,"_",sens_text,".csv", sep = "")),
+  row.names = FALSE)
+
+```
+
+# ANALYSIS PART 2: Explore differences by income group and region
+
+- In this section we analyse the differences between reported and expected coverage, in general and across different strata. 
+- Note that making a pairwise t-test between the reported and expected coverage is identical to testing deltas against the null hypothesis that delta = 0. For simplicity, we do the latter. Simple ANOVAs will be used when comparing deltas across strata.
+
+## Investigate differences by region 
+
+- Here we perform an ANOVA and associated boxplot by region.
+- Again, to reduce code, we input which year analysis is being conducted on
+
+```{r}
+# linear model
+lm_region <- lm(delta ~ -1 + region, data = data_test)
+
+# ANOVA
+anova(lm_region)
+
+# Tests on individual coefficients
+lm_region %>%
+  summary()
+ttest_regions <- lm_region %>%
+  summary() %>%
+  tidy()
+
+# Create readable output
+stats_regions <- data_test %>%
+  group_by(region) %>%
+  summarise(sample_size = n(),
+            reported = mean(coverage),
+            expected = mean(mean),
+            delta = mean(delta))
+
+# Confidence intervals (95%)
+ci_regions <- lm_region %>%
+  confint() %>%
+  as.data.frame() %>%
+  setNames(c("lower_ci", "upper_ci")) %>%
+  tibble()
+
+tt_regions <- tibble(stats_regions, ci_regions, ttest_regions) %>%
+  select(-c(term, std.error, estimate))
+tt_regions
+
+# Format output for paper
+tt_regions_paper <- tt_regions %>%
+  mutate(reported = round(reported, digits = 3) * 100,
+         Reported = paste(reported,"%", sep = ""),
+         expected = round(expected, digits = 3) * 100,
+         Expected = paste(expected,"%", sep = ""),
+         delta = round(delta, digits = 3) * 100,
+         lower_ci = round(lower_ci, digits = 3) * 100,
+         upper_ci = round(upper_ci, digits = 3) * 100,
+         Delta = paste(delta,"% [",lower_ci,"%; ",upper_ci,"%]",sep = ""),
+         `p-value` = ifelse(p.value < 0.0001, "< 0.0001", signif(p.value, digits = 2))) %>%
+  select(Region = region, `Sample size` = sample_size, Expected, Reported, Delta, `p-value`)
+tt_regions_paper
+
+write.csv(
+  tt_regions_paper,
+  here::here(csv_folder, paste("2table_paper_partial_ANOVA_region_",params$data,"_",test_year,"_",sens_text,".csv", sep = "")),
+  row.names = FALSE)
+
+
+# For future use
+country_count <- tt_regions_paper %>% summarise(n = sum(`Sample size`))
+country_count <- country_count$n
+country_count
+```
+
+### Visualise differences by region
+We generate a boxplot by region:
+
+```{r boxplot_region}
+# Generate region box plot
+fig_region <- ggplot(data_test,
+                 aes(x = region, y = delta, color = region)) +
+  geom_boxplot(aes(color = region)) +
+  geom_point(size = 2, position = position_jitter(width = 0.2), alpha = .5) +
+  scale_colour_manual(values = region_pal) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = region_pal) +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2)) +
+  labs(x = "",
+       y = "Change in coverage (reported - expected)") +
+  theme_light() +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 14),
+        axis.title.y = element_text(angle = 90),
+        axis.title = element_text(size = 17)) +
+  scale_x_discrete(labels = wrap_format(12)) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed", colour = "black", size = 1)
+fig_region
+
+# Generate region violin plot
+violin_region <- ggplot(data_test, aes(x = region, y = delta, color = region)) +
+  geom_violin(aes(color = region)) +
+  geom_linerange(data = tt_regions, aes(ymin = lower_ci, ymax = upper_ci)) +
+  geom_point(size = 2, position = position_jitter(width = 0.2), alpha = .5) +
+  scale_colour_manual(values = region_pal) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = region_pal) +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2),  limits = c(-0.4, 0.4)) +
+  labs(x = "",
+       y = paste("Change in coverage (reported - expected) ",test_year, sep = "")) +
+  theme_light() +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 12),
+        axis.title.y = element_text(angle = 90),
+        axis.title = element_text(size = 14)) +
+  scale_x_discrete(labels = wrap_format(12)) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed", colour = "black", size = 1)
+
+violin_region
+```
+
+
+## Investigate differences by income group
+
+- Here we perform an ANOVA and associated boxplot by income group.
+- Again, to reduce code, we input which year analysis is being conducted on
+
+```{r}
+# Print what parameters are being tested
+print(paste("Showing results for: ",test_year,sens_text))
+
+# remove countries with no income group
+res_no_missing_income <- data_test %>%
+  filter(income_group != "") %>%
+  droplevels()
+
+# linear model
+lm_income <- lm(delta ~ -1 + income_group,
+                 data = res_no_missing_income)
+
+# ANOVA
+anova(lm_income)
+
+# Tests on individual coefficients
+lm_income %>%
+  summary()
+ttest_incomes <- lm_income %>%
+  summary() %>%
+  tidy()
+
+# Create readable output
+stats_incomes <- res_no_missing_income %>%
+  group_by(income_group) %>%
+  summarise(sample_size = n(),
+            reported = mean(coverage),
+            expected = mean(mean),
+            delta = mean(delta))
+
+# Confidence intervals (95%)
+ci_incomes <- lm_income %>%
+  confint() %>%
+  as.data.frame() %>%
+  setNames(c("lower_ci", "upper_ci")) %>%
+  tibble()
+
+tt_incomes <- tibble(stats_incomes, ci_incomes, ttest_incomes) %>%
+  select(-c(term, std.error, estimate))
+tt_incomes
+
+# Format output for paper
+tt_incomes_paper <- tt_incomes %>%
+  mutate(reported = round(reported, digits = 3) * 100,
+         Reported = paste(reported,"%", sep = ""),
+         expected = round(expected, digits = 3) * 100,
+         Expected = paste(expected,"%", sep = ""),
+         delta = round(delta, digits = 3) * 100,
+         lower_ci = round(lower_ci, digits = 3) * 100,
+         upper_ci = round(upper_ci, digits = 3) * 100,
+         Delta = paste(delta,"% [",lower_ci,"%; ",upper_ci,"%]",sep = ""),
+         `p-value` = ifelse(p.value < 0.0001, "< 0.0001", signif(p.value, digits = 2))) %>%
+  select(`Income group` = income_group, `Sample size` = sample_size, Reported, Expected, Delta, `p-value`)
+tt_incomes_paper
+
+write.csv(
+  tt_incomes_paper,
+  here::here(csv_folder, paste("3table_paper_partial_ANOVA_income_",params$data,"_",test_year,"_",sens_text,".csv", sep = "")),
+  row.names = FALSE)
+```
+
+### Visualise differences by income group
+We generate a boxplot by income group:
+
+```{r boxplot_income}
+# Generate income group box plot
+fig_income <- ggplot(res_no_missing_income,
+                     aes(x = income_group, y = delta, color = income_group)) +
+  labs(x = "",
+       y = "Change in coverage (reported - expected)") +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2)) +
+  geom_boxplot() +
+  geom_point(size = 2, position = position_jitter(width = 0.2), alpha = .5) +
+  scale_colour_manual(guide = FALSE, values = income_pal) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = income_pal) +
+  theme_light() +
+    theme(legend.position = "none",
+        axis.text = element_text(size = 14),
+        axis.title.y = element_text(angle = 90),
+        axis.title = element_text(size = 17)) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed", colour = "black", size = 1)
+
+fig_income
+
+# Generate income group violin plot
+violin_income <- ggplot(res_no_missing_income,
+                     aes(x = income_group, y = delta, color = income_group)) +
+  geom_violin(aes(color = income_group)) +
+  geom_linerange(data = tt_incomes, aes(ymin = lower_ci, ymax = upper_ci)) +
+  geom_point(size = 2, position = position_jitter(width = 0.2), alpha = .5) +
+  scale_colour_manual(values = income_pal) +
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 4, color = income_pal) +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2), limits = c(-0.4, 0.4)) +
+  labs(x = "",
+       y = paste("Change in coverage (reported - expected) ",test_year, sep = "")) +
+  theme_light() +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 12),
+        axis.title.y = element_text(angle = 90),
+        axis.title = element_text(size = 14)) +
+  scale_x_discrete(labels = wrap_format(12)) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed", colour = "black", size = 1)
+violin_income
+
+```
+
+
+## Investigate multi-variable differences in coverage: by region and income group
+
+We check if deltas still differ by region after accounting for the effect of
+income and vice versa, by conducing ANOVA by region and income
+
+```{r}
+# check link between income group and region using simulated Chi-square
+table(
+  res_no_missing_income$income_group,
+  res_no_missing_income$region) %>%
+  chisq.test(simulate.p.value = TRUE, B = 1e5)
+
+# effect of region after accounting for income
+lm_income_region <- lm(delta ~ income_group + region,
+                       data = res_no_missing_income)
+# ANOVA
+anova(
+  update(lm_income_region, . ~ . -region), # ~ income
+  lm_income_region # ~ income + region
+  )
+
+# effect of income after accounting for region
+lm_region_income <- lm(delta ~ region + income_group,
+                       data = res_no_missing_income)
+
+# ANOVA
+anova(
+  update(lm_region_income, . ~ . -income_group), # ~ region
+  lm_region_income # ~ region + income
+  )
+
+```
+## Explanatory power of income and region model
+```{r}
+summary(lm_region_income)
+summary(lm_income_region)
+```
+
+### Visualise differences by both income group and region
+- We generate manuscript figure illustrating income and region trends adjacent:
+
+```{r}
+heterogeneity_fig <- plot_grid(violin_region, violin_income,
+                    labels = c("C", "D")) #Replace labelling with A and B for 2020, 
+                                              #C and D for 2021 and E and F for 2022 to allow for 2x3 figure
+heterogeneity_fig
+
+ggsave(filename = here::here(fig_folder, paste("3fig_paper_partial_heterogeneity_fig_",params$data,".png",sep = "")),
+       plot = heterogeneity_fig, 
+       width = 30, height = 15, units = "cm")
+```
+<br>
+
+# Country
+
+## Plot difference between reported and expected coverage per country on scatterplots - single year
+- We create scatterplots for each year, such that each country is plot with its corresponding confidence interval. 
+- Red dots indicate countries for which the 95% CI of delta excludes zero.
+- Instead of writing similar code 3 times we require user to input which year to plot.
+- These plots are combined together to produce Figure 2 of the paper [supplementary code to combine each plot not shown]
+
+```{r, fig.width = 8, fig.height = 8}
+# Enter which year to plot
+plot_year <- test_year
+
+res_plot <- res %>%
+  filter(year == plot_year)
+
+# Create scatterplot
+fig_overall_results <- res_plot %>% 
+  ggplot(aes(x = mean, y = coverage)) +
+  geom_pointrange(alpha = .4, aes(xmin = lower_ci, xmax = upper_ci, color = within_ci)) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) + 
+  scale_x_continuous(labels = unit_format(unit = "%", scale = 1e+2), limits = c(0.2,1)) +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2), limits = c(0.2,1)) +
+  scale_color_manual(guide = FALSE,
+                     values = c(`TRUE` = "black",
+                                `FALSE` = "#e63553")) +
+  labs(x = paste("Expected coverage in",plot_year),
+       y = paste("Actual coverage in",plot_year)) +
+  theme_light() +
+  theme(plot.title = element_text(face = "bold", size = 20),
+        legend.position = "none",
+        axis.text = element_text(size = 12),
+        axis.title.y = element_text(angle = 90),
+        axis.title = element_text(size = 17)
+  )
+
+fig_overall_results
+
+# Save file
+ggsave(filename = here::here(fig_folder, paste("4fig_paper_partial_country_black_red_",params$data,"_",plot_year,".png", sep = "")),
+       plot = fig_overall_results, 
+       width = 15, height = 15, units = "cm")
+
+```
+
+### Counts of country trends
+```{r}
+## Individual countries
+# Count number of countries where reported coverage is outside confidence intervals of expected coverage
+conf <- res %>% 
+  filter(!within_ci) %>%
+  mutate(classification = ifelse(coverage < lower_ci, "lower", "higher")) %>%
+  group_by(year, classification) %>%
+  count() %>%
+  pivot_wider(names_from = classification, values_from = n)
+conf
+```
+
+## Exploring absolute and modelled trends
+First we classify countries in terms of their absolute reported coverage from 2019-2022 by comparing coverage levels during this time
+```{r}
+# Classify countries
+country_classification <- combo_data %>%
+  filter(year > 2018) %>%
+  select(iso_code, year, coverage, forecast_coverage) %>%
+  pivot_wider(names_from = year, values_from = c(coverage, forecast_coverage)) %>%
+  select(-forecast_coverage_2019) %>%
+  mutate(absolute_classification = 
+           ifelse((coverage_2019 == coverage_2020 & coverage_2020 == coverage_2021 & coverage_2021 == coverage_2022), 
+                  "3. static",
+                  ifelse(coverage_2022 > coverage_2019, "5. improved",
+                         ifelse((coverage_2020 < coverage_2019 | coverage_2021 < coverage_2019) &
+                                  coverage_2022 > min(coverage_2020, coverage_2021) & 
+                                  coverage_2022 == coverage_2019, "4. full rebound",
+                                ifelse((coverage_2020 < coverage_2019 | coverage_2021 < coverage_2019) &
+                                  coverage_2022 > min(coverage_2020, coverage_2021), "2. lower with partial rebound",
+                         ifelse(coverage_2022 < coverage_2019, "1. absolute decline", "3. static")))))) %>%
+  mutate(total_delta = (forecast_coverage_2022 - coverage_2022) + (forecast_coverage_2021 - coverage_2021) + (forecast_coverage_2020 - coverage_2020),
+         total_gap_to_2019 = (forecast_coverage_2020 - coverage_2019) + (forecast_coverage_2021 - coverage_2019) + (forecast_coverage_2022 - coverage_2019)) %>%
+  mutate(total_delta = round(total_delta, digits = 3),
+         total_gap_to_2019 = round(total_gap_to_2019, digits = 3),
+         final_coverage = round((coverage_2022 - coverage_2019), digits = 3))
+
+# Count countries by classification
+country_abs_classification_summary <- country_classification %>%
+  group_by(absolute_classification) %>%
+  count() %>%
+  mutate(percent = round(n/country_count*100,digits = 1))
+country_abs_classification_summary
+```
+To quantify the values shown in each quadrant we do counts - 
+```{r}
+
+# Define criteria for each quadrant
+criteria_list <- list(
+  top_left = country_classification$total_delta > 0 & country_classification$final_coverage > 0,
+  top_right = country_classification$total_delta <= 0 & country_classification$final_coverage > 0,
+  bottom_right = country_classification$total_delta <= 0 & country_classification$final_coverage < 0,
+  bottom_left = country_classification$total_delta > 0 & country_classification$final_coverage < 0,
+  static = country_classification$final_coverage ==0
+)
+
+# Create a vector to hold the criteria names for each row
+criteria_names <- c()
+for (i in seq_along(criteria_list)) {
+  criteria_names <- c(criteria_names, rep(names(criteria_list)[i], sum(criteria_list[[i]])))
+}
+
+# Create a data frame to hold the criteria names and counts
+summary_data <- data.frame(
+  criteria_name = criteria_names,
+  count = rep(1, length(criteria_names))
+)
+
+# Summarize the counts
+summary_data <- summary_data %>%
+  group_by(criteria_name) %>%
+  summarise(count = sum(count))
+
+summary_data
+
+```
+
+Then we plot country performance with relation to:
+- x-axis: reported vs. expected coverage (total for 2020-2022)
+- y-axis: 2022 vs. 2019 reported coverage
+
+```{r}
+fig_programmatic <- country_classification %>% 
+  ggplot(aes(x = -total_delta, y = final_coverage, color = absolute_classification)) +
+  geom_point(alpha = .5, size = 3) +
+  geom_vline(xintercept = 0, linetype = 2, color = "black") +
+  geom_hline(yintercept = 0, linetype = 2, color = "black") +
+  scale_x_continuous(labels = unit_format(unit = "%", scale = 1e+2), limits = c(-0.5,0.5)) +
+  scale_y_continuous(labels = unit_format(unit = "%", scale = 1e+2), limits = c(-0.25,0.25)) +
+  scale_color_manual(values = c(`1. absolute decline` = "red",
+                                `2. lower with partial rebound` = "orange",
+                                `3. static` = "yellow",
+                                `4. full rebound` = "green",
+                                `5. improved` = "skyblue"),
+                     labels = c(paste("Decline, n = ",country_abs_classification_summary$n[1]," (",round(country_abs_classification_summary$n[1]/country_count*100, digits = 1),"%)", sep=""),
+                                paste("Partial Rebound, n = ",country_abs_classification_summary$n[2]," (",round(country_abs_classification_summary$n[2]/country_count*100, digits = 1),"%)", sep=""),
+                                paste("Static, n = ",country_abs_classification_summary$n[3]," (",round(country_abs_classification_summary$n[3]/country_count*100, digits = 1),"%)", sep=""),
+                                paste("Full Rebound, n = ",country_abs_classification_summary$n[4]," (",round(country_abs_classification_summary$n[4]/country_count*100, digits = 1),"%)", sep=""),
+                                paste("Improved, n = ",country_abs_classification_summary$n[5]," (",round(country_abs_classification_summary$n[5]/country_count*100, digits = 1),"%)", sep=""))) +
+  labs(x ="Total delta between expected and reported coverage 2020-2022 (percentage points)",
+       y ="Difference in reported coverage in 2022 compared to 2019 (percentage points)",
+       color = "Within-country trend in\nreported coverage (2019-2022)") +
+  theme_light() +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(size = 9),
+        axis.title.y = element_text(angle = 90),
+        axis.title = element_text(size = 10),
+        legend.position = "right",
+        legend.text = element_text(size = 9),
+        legend.title = element_text(size = 10, face = "bold")
+  )+ 
+  annotate("text", x = 0.25, y = -0.2, 
+           label = paste("Met or outperformed expectations\n but remain lower than\n pre-pandemic coverage\n n = ",
+           summary_data$count[2]," (",format(round(summary_data$count[2]/country_count*100,digits = 1), nsmall = 1),"%)", sep = ""), 
+           size = 3)+
+  annotate("text", x = -0.25, y = -0.2, 
+           label = paste("Coverage lower than expectations\n and has not recovered\n to pre-pandemic levels\n n = ",
+           summary_data$count[1]," (",format(round(summary_data$count[1]/country_count*100,digits = 1), nsmall = 1),"%)", sep=""), 
+           size = 3)+
+  annotate("text", x = 0.25, y = 0.2, 
+           label = paste("Met or outperformed expectations\n and coverage in 2022\n higher than pre-pandemic\n n = ",
+           summary_data$count[5]," (",format(round(summary_data$count[5]/country_count*100,digits = 1), nsmall = 1),"%)", sep=""),
+           size = 3)+
+  annotate("text", x = -0.25, y = 0.2, 
+           label = paste("Coverage lower than expectations\n but has recovered to \n pre-pandemic levels\n n = ",
+           summary_data$count[4]," (",format(round(summary_data$count[4]/country_count*100,digits = 1), nsmall = 1),"%)", sep = ""), 
+           size = 3)+
+  annotate("text", x = 0.25, y = -0.05, 
+           label = paste("Coverage static throughout pandemic\n or rebounded to pre-pandemic levels\n n = ",
+           summary_data$count[3]," (",format(round(summary_data$count[3]/country_count*100,digits = 1), nsmall = 1),"%)",sep = ""), 
+           size = 3)
+fig_programmatic
+
+ggsave(filename = here::here(fig_folder, paste("5fig_paper_programmatic_",params$data,".png", sep = "")),
+       plot = fig_programmatic, 
+       width = 20, height = 20, units = "cm")
+```
+
+
+### Identifying countries that performed well
+```{r}
+res_2021 <- res %>%
+  filter(year == 2021)  #so that only matching to one iso_code instead of 3 years per iso_code
+
+# Identify top 10 countries in top right corner of plot
+top_right_countries <- country_classification %>%
+  filter(total_delta <= 0 & final_coverage > 0) %>%
+  select(iso_code, coverage_2019, coverage_2022, total_delta, total_gap_to_2019) %>%
+  left_join(res_2021, by = "iso_code") %>% #just to add in country income group and region easily
+  #filter(within_ci == FALSE) %>%
+  select(country, iso_code, region, income_group, coverage_2019, coverage_2022, total_delta, total_gap_to_2019, within_ci) %>%
+  arrange(total_delta) %>%
+  head(10)
+top_right_countries
+
+# Format for readable table
+top_right_table <- top_right_countries %>%
+  mutate(coverage_2019 = round(coverage_2019*100),
+         coverage_2022 = round(coverage_2022*100),
+         total_delta = - round(total_delta*100, digits = 1), #since deltas are calculated as negative differences
+         total_gap_to_2019 = coverage_2022 - coverage_2019,
+         within_ci = ifelse(within_ci == TRUE, "no", "yes")) %>% 
+  select(Country = country, Region = region, `Income group` = income_group,`Reported coverage 2019` = coverage_2019,
+         `Reported coverage 2022` = coverage_2022, `Difference 2022 - 2019 coverage` = total_gap_to_2019,
+         `% additional coverage achieved during pandemic` = total_delta,
+         `Evidence reported coverage higher than expected (p < 0.05)` = within_ci) 
+top_right_table
+
+# Plot figure for coverage trends - since concerned about model fitting for top listed countries
+arima_color <- "#ac3973"  # Define color for model
+
+x_top_right <- x %>%
+  filter(iso_code %in% top_right_countries$iso_code)
+
+res_top_right <- res %>%
+  filter(iso_code %in% top_right_countries$iso_code)
+
+fig_top_right <- x_top_right %>%
+  ggplot(aes(x = year, y = coverage)) +
+  theme_bw() +
+  geom_point(alpha = 0.8) +
+  geom_line(alpha = 0.3) +
+  geom_errorbar(data = res_top_right,
+                aes(ymin = lower_ci, ymax = upper_ci),
+                color = arima_color) +
+  geom_point(data = res_top_right,
+             aes(y = mean), shape = 3, color = arima_color) +
+  facet_wrap(~ country, scales = "free_y",
+             labeller = label_wrap_gen(17),
+             nrow = 2,
+             ncol = 5) +   
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1L), 
+                     limits = c(NA,1),
+                     n.breaks = 5) +
+  labs(y = "Coverage (%)",
+       x = "Year") +
+  theme(axis.text.x = element_text(angle=45,hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14), 
+        strip.text.x = element_text(size = 14), 
+        axis.title = element_text(size = 18))
+fig_top_right
+
+ 
+
+# Save file
+ggsave(filename = here::here(fig_folder, paste("appendix_s11_top_right_countries_",params$data,".png", sep="")),
+       plot = fig_top_right, 
+       width = 30, height = 15, units = "cm")
+
+```
+
+
+# Missed immunisations / Zero Dose
+
+## Calculate missed immunisations per year
+
+- We multiply coverage  estimates by surviving infant populations to
+calculate missed immunisations each year
+- We also calculate confidence intervals
+
+### Data cleaning and combining
+```{r}
+# Create labels for table (since doing multiplication of two df)
+labelling <- res %>%
+  select(iso_code, country, region, income_group) %>%
+  distinct() %>%
+  arrange(iso_code)
+
+# Extract surviving infant population estimates for each year based on latest UNWPP data
+si_table <- unwpp %>%
+  select(-country) %>%
+  pivot_wider(values_from = surviving_infants, 
+              names_from = year, 
+              ) %>%
+              #names_prefix = "year_") %>%
+  filter(iso_code %in% res$iso_code) %>%
+  arrange(iso_code) 
+
+# Extract DTP1 gap to 100% coverage each year based on latest WUENIC data
+missed_cov_table <- data_raw %>%
+  select(-starts_with("19")) %>%
+  rename(iso_code = iso3) %>%
+  select(-c(unicef_region, country, vaccine)) %>%
+  filter(iso_code %in% res$iso_code) %>%
+  mutate(across(starts_with("20"), ~ (100 - .) / 100)) %>%
+  arrange(iso_code) %>%
+  select(iso_code, `2000`,`2001`,`2002`,`2003`,`2004`,`2005`,`2006`,`2007`,`2008`,`2009`,`2010`,`2011`,`2012`,`2013`,`2014`,`2015`,`2016`,`2017`,`2018`,`2019`,`2020`,`2021`,`2022`)
+
+# Multiply through the surviving infant population and coverage data to create number of missed immunisations per year
+missed <- missed_cov_table[, -1] * si_table[, -1]
+
+missed_dataset <- labelling %>% #add back in the labels that got lost in the multiplication
+  cbind(missed)
+missed_dataset
+
+```
+
+### Summary outputs
+```{r}
+# Check analyses hold by looking at surviving infant population growth over time 
+si_sum <- colSums(si_table[,-1])
+si_sum
+
+# Create totals per year
+total_missed <- missed_dataset %>%
+  select(-c(income_group, region, country)) %>%
+  pivot_longer(cols = -iso_code,
+               names_to = "year",
+               values_to = "missed") %>%
+  group_by(year) %>%
+  summarise(missed_immunisations = sum(missed)) %>%
+  mutate(year = as.numeric(year))
+total_missed
+
+# Calculate proportion of population being modelled
+global_pop <- sum(na.omit(unwpp_2022$surviving_infants))
+modelled_pop <- sum(na.omit(si_table$`2022`))
+prop_modelled <- modelled_pop/global_pop
+prop_modelled
+```
+
+## Figures of missed immunisations
+We create output figures which are then combined to create a figure for the paper
+
+### Visualise total missed immunisations over time
+We create a bar chart showing the total number of missed immunisations per year
+```{r}
+# Plot the bar chart with error bars
+missed_plot <- ggplot(total_missed, aes(x = as.numeric(year), y = missed_immunisations)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  geom_hline(aes(yintercept = total_missed$missed_immunisations[20]), linetype = "dashed", colour = "gray35", size = 0.8)+
+  annotate("text", x = 2019, y = total_missed$missed_immunisations[20]-1000000, 
+           label = paste("2019 missed immunisations = ",round(total_missed$missed_immunisations[20]/1000000,1)," M", sep = ""), 
+           size = 3,
+           colour = "gray35")+  
+  theme_light() +
+  scale_y_continuous(labels = function(x) paste0(x/1e6, "M"),
+                     breaks = seq(0, 4.0e7, by = 5e6)) +
+  scale_x_continuous(breaks = seq(min(total_missed$year), max(total_missed$year), by = 1)) +
+  labs(x = "Year", y = "Missed Immunisations (Millions)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y.left = element_text(size = 9),
+        axis.title.y = element_text(size = 9),
+        panel.grid.major = element_line(color = "gray", size = 0.2, linetype = "solid"),
+        panel.grid.minor = element_blank()) 
+missed_plot
+```
+
+### Visualise missed immunisations over time by region
+We breakdown the missed immunisations per year into a facet plot by region
+```{r}
+# Summarize data by region
+missed_reg_long <- missed_dataset %>%
+  select(-c(iso_code, country, income_group)) %>%
+  group_by(region) %>%
+  pivot_longer(cols = -region,
+               names_to = "year",
+               values_to = "missed_immunisations") %>%
+  mutate(year = as.numeric(year))
+  
+# Plot the by region
+missed_plot_by_reg <- ggplot(missed_reg_long, aes(x = year, y = missed_immunisations, fill = region)) +
+  geom_bar(stat = "identity", width = 0.8) +
+  theme_light() +
+  scale_y_continuous(labels = function(x) paste0(x/1e6, "M"),
+                     breaks = seq(0, 4.0e7, by = 5e6))+
+  scale_x_continuous(breaks = seq(2000, 2022, by = 5))+
+  labs(x = "Year", y = "Missed Immunisations (Millions)", fill = "Region") +
+  scale_fill_manual(values = region_pal) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        axis.text.y.left = element_text(size = 9),
+        axis.title.y = element_text(size = 9),
+        panel.grid.major = element_line(color = "gray", size = 0.2, linetype = "solid"),
+        panel.grid.minor = element_blank())+
+  facet_grid(. ~ region)
+missed_plot_by_reg
+
+```
+
+### Visualise missed immunisations over time by income group
+We breakdown the missed immunisations per year into a facet plot by income
+
+```{r}
+# Summarize data by income group
+missed_income_long <- missed_dataset %>%
+  filter(income_group != "") %>%
+  select(-c(iso_code, country, region)) %>%
+  group_by(income_group) %>%
+  pivot_longer(cols = -income_group,
+               names_to = "year",
+               values_to = "missed_immunisations") 
+  
+  
+# Plot the by income group
+missed_plot_by_income <- ggplot(missed_income_long, 
+                                aes(x = year, y = missed_immunisations, fill = income_group)) +
+  geom_bar(stat = "identity", width = 0.8) +
+  theme_light() +
+  scale_y_continuous(labels = function(x) paste0(x/1e6, "M"),
+                     breaks = seq(0, 4.0e7, by = 5e6))+
+  scale_x_discrete(breaks = seq(2000, 2022, by = 5))+
+  labs(x = "Year", y = "Missed Immunisations (Millions)", fill = "Income Group") +
+  scale_fill_manual(values = income_pal) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y.left = element_text(size = 9),
+        axis.title.y = element_text(size = 9),
+        panel.grid.major = element_line(color = "gray", size = 0.2, linetype = "solid"),
+        panel.grid.minor = element_blank())+
+  facet_grid(. ~ income_group)
+missed_plot_by_income
+
+```
+
+### Combine figures to create paper for the manuscript 
+- We generate manuscript figure illustrating income and region trends as panel of a combined figure
+
+```{r}
+missed_immunisations_fig <- plot_grid(missed_plot, missed_plot_by_reg, missed_plot_by_income,
+                                      nrow = 3,
+                                      rel_widths = c(1,1,1),
+                                      rel_heights = c(1.1, 1, 1.1),
+                                      labels = c("A", "B", "C"))
+missed_immunisations_fig
+
+ggsave(filename = here::here(fig_folder, paste("6fig_paper_missed_immunisations_fig_",params$data,".png", sep = "")),
+       plot = missed_immunisations_fig, 
+       width = 20, height = 20, units = "cm")
+```
+
+## Investigate countries with large and growing populations of missed immunisations
+
+### Create table structure
+We create a table showing the number of missed immunisations and additional missed immunisations compared to 2019
+```{r}
+# Compare missed immunisations in 2020-2022 to levels in 2019
+missed_tab <- missed_dataset %>%
+  select(country, iso_code, region, income_group, reported_2019 = `2019`, reported_2020 = `2020`, reported_2021 = `2021`, reported_2022 =`2022`) %>%
+  mutate(extra_2020 = reported_2020 - reported_2019, extra_2021 = reported_2021 - reported_2019, extra_2022 = reported_2022 - reported_2019, 
+         reported_total = reported_2020 + reported_2021 + reported_2022,
+         extra_total = extra_2020 + extra_2021 + extra_2022,
+         proportion_extra = extra_total/reported_total)
+missed_tab
+```
+
+### Summary table for paper
+We create a summary table of countries with the most additional missed immunisations
+In the paper we show this for DTP1, given ZD relevance
+```{r}
+# Order and select the 10 countries with most additional missed immunisations 
+missed_summary <- missed_tab %>%
+  arrange(desc(extra_total)) %>%
+  head(n = 10) %>%
+  mutate(reported_total = round(reported_total/1e06, digits = 2),
+         extra_total = round(extra_total/1e06, digits = 2),
+         proportion_extra = paste(round(proportion_extra*100,digits = 1))) %>%
+  select(Country = country, Region = region, `Income group` = income_group, `Reported total ZD (2020-2022, M)` = reported_total, 
+         `Additional ZD (2020-2022, M)` = extra_total, `Proportion additional (%)` = proportion_extra) %>%
+  mutate()
+missed_summary
+
+# Save output
+write.csv(
+  missed_summary,
+  here::here(csv_folder, paste("4table_paper_missed_immunisations_table_",params$data,".csv", sep = "")),
+  row.names = FALSE)
+```
+# Supplementary materials outputs
+## Create output dataset for supplementary materials to allow full exploration of all modelling
+```{r}
+output_res <- res %>%
+  select(country, iso_code, region, income_group, year, arima_model = method,
+         forecast_coverage = mean, lower_ci, upper_ci, reported_coverage = coverage,
+         delta, lower_delta, upper_delta, within_ci) %>%
+  mutate(year = as.numeric(year))
+
+si_long <- si_table %>%
+  select(iso_code, `2020`, `2021`, `2022`) %>%
+  pivot_longer(cols = c(`2020`, `2021`, `2022`), names_to = "year", values_to = "surviving_infants") %>%
+  mutate(year = as.numeric(year))
+
+output_res %<>%
+  left_join(si_long, by = c("iso_code", "year"))
+
+missed_long <- missed_dataset %>%
+  select(iso_code, `2020`, `2021`, `2022`) %>%
+  pivot_longer(cols = c(`2020`, `2021`, `2022`), names_to = "year", values_to = "missed_immunisations") %>%
+  mutate(year = as.numeric(year),
+         missed_immunisations = round(missed_immunisations, digits = 0))
+
+output_res %<>%
+  left_join(missed_long, by = c("iso_code", "year"))
+
+write.csv(
+  output_res,
+  here::here(csv_folder, paste("supplementary_table_",params$data,".csv", sep = "")),
+  row.names = FALSE)
+```
+
